@@ -1,0 +1,21 @@
+{
+  "name": "Mziya",
+  "short_name": "Mziya",
+  "description": "Mine Mziya Coin (MZY) from your phone — a fully peer-to-peer blockchain.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#08080e",
+  "theme_color": "#08080e",
+  "lang": "en",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='40' fill='%2308080e'/><text y='130' x='50%' text-anchor='middle' font-size='120' fill='%23ffc832'>⬡</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["finance", "utilities"],
+  "screenshots": []
+}
