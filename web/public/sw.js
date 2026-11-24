@@ -4,7 +4,7 @@
  * P2P network reconnects automatically when back online.
  */
 
-const CACHE_NAME = 'mziya-v2';
+const CACHE_NAME = 'mziya-v3';
 // Only cache files that actually exist at these paths.
 // Vite bundles JS into hashed filenames — those are handled by network-first strategy below.
 const SHELL_FILES = [

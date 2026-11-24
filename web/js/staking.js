@@ -21,6 +21,12 @@ function el(tag, css = '', text = '') {
   return e;
 }
 
+function icon(name) {
+  const i = document.createElement('i');
+  i.dataset.lucide = name;
+  return i;
+}
+
 export function renderStakingPanel(appRef) {
   app = appRef;
   const container = document.getElementById('staking-panel');
@@ -34,40 +40,79 @@ export function renderStakingPanel(appRef) {
   const isValidator = addr ? state.isValidator(addr) : false;
   const share = stats.totalStaked > 0 && isValidator ? (stake / stats.totalStaked) * 100 : 0;
 
-  const card = el('div', 'background:var(--surface-3);border:1px solid var(--border);border-radius:8px;padding:12px');
-  const header = el('div', 'display:flex;justify-content:space-between;align-items:center;margin-bottom:8px');
-  header.appendChild(el('span', 'font-size:13px;font-weight:700;color:var(--text-1)', 'Staking — Become a Validator'));
-  header.appendChild(el('span', `font-size:11px;font-weight:700;color:${isValidator ? 'var(--green)' : 'var(--text-3)'}`,
-    isValidator ? 'VALIDATOR' : 'NOT STAKED'));
-  card.appendChild(header);
+  const head = el('div');
+  head.className = 'card-head';
+  const title = el('div');
+  title.className = 'card-title';
+  const ico = el('span');
+  ico.className = 'ico';
+  ico.appendChild(icon('layers'));
+  title.appendChild(ico);
+  title.append('Stake & Validate');
+  head.appendChild(title);
+  const badge = el('span', '', isValidator ? 'Validator' : 'Not staked');
+  badge.className = 'badge ' + (isValidator ? 'badge-green' : 'badge-gray');
+  head.appendChild(badge);
+  container.appendChild(head);
 
-  const info = el('div', 'font-size:11px;color:var(--text-2);line-height:1.6;margin-bottom:10px');
-  info.appendChild(el('div', '', `Stake ${TOKENOMICS.MIN_STAKE} MZY or more to: produce blocks, earn ${TOKENOMICS.STAKER_REWARD_SHARE * 100}% extra on every mining claim (split by stake), mine at +${TOKENOMICS.VALIDATOR_BONUS * 100}%, and earn DeCompute verifier fees.`));
-  info.appendChild(el('div', '', `Your stake: ${formatMZY(stake, 4)} MZY${isValidator ? ` · ${share.toFixed(2)}% of all stake` : ''}`));
-  info.appendChild(el('div', '', `Network: ${stats.validatorCount} validators · ${formatMZY(stats.totalStaked, 2)} MZY staked · ${formatMZY(stats.totalStakingRewards, 4)} MZY paid to validators · ${formatMZY(stats.totalBurned, 6)} MZY burned`));
-  card.appendChild(info);
+  const desc = el('p', '', `Lock ${TOKENOMICS.MIN_STAKE}+ MZY to help secure the network and earn.`);
+  desc.className = 'card-desc';
+  container.appendChild(desc);
 
-  if (!addr) {
-    container.appendChild(card);
-    return;
+  const perks = el('div');
+  perks.className = 'perk-list';
+  for (const text of [
+    `${TOKENOMICS.STAKER_REWARD_SHARE * 100}% extra minted on every mining claim, shared by stake`,
+    `+${TOKENOMICS.VALIDATOR_BONUS * 100}% on your own mining rate`,
+    'Produce blocks and earn verifier fees from the AI market',
+  ]) {
+    const row = el('div');
+    row.className = 'perk';
+    row.appendChild(icon('check'));
+    row.append(text);
+    perks.appendChild(row);
   }
+  container.appendChild(perks);
 
-  const amountIn = el('input', 'width:100%;padding:8px;margin-bottom:6px;border-radius:6px;border:1px solid var(--border);background:var(--surface-2);color:var(--text-1);font-size:12px;box-sizing:border-box');
+  const kv = el('div');
+  kv.className = 'kv-list';
+  const addKv = (k, v) => {
+    const row = el('div');
+    row.className = 'kv';
+    const ks = el('span', '', k); ks.className = 'k';
+    const vs = el('span', '', v); vs.className = 'v';
+    row.appendChild(ks); row.appendChild(vs);
+    kv.appendChild(row);
+  };
+  addKv('Your stake', `${formatMZY(stake, 4)} MZY${isValidator ? ` · ${share.toFixed(1)}%` : ''}`);
+  addKv('Validators', String(stats.validatorCount));
+  addKv('Total staked', `${formatMZY(stats.totalStaked, 2)} MZY`);
+  addKv('Paid to validators', `${formatMZY(stats.totalStakingRewards, 4)} MZY`);
+  addKv('Burned by fees', `${formatMZY(stats.totalBurned, 6)} MZY`);
+  container.appendChild(kv);
+
+  if (!addr) return;
+
+  const amountIn = document.createElement('input');
+  amountIn.className = 'form-input';
   amountIn.type = 'number';
-  amountIn.placeholder = `Amount (MZY) — available ${formatMZY(state.getBalance(addr), 4)}`;
-  card.appendChild(amountIn);
+  amountIn.inputMode = 'decimal';
+  amountIn.placeholder = `Amount · ${formatMZY(state.getBalance(addr), 4)} MZY available`;
+  container.appendChild(amountIn);
 
-  const row = el('div', 'display:flex;gap:8px');
-  const btnCss = 'flex:1;padding:9px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;border:none';
-  const stakeBtn = el('button', btnCss + ';background:var(--gold);color:#000', 'Stake');
-  const unstakeBtn = el('button', btnCss + ';background:var(--surface-2);color:var(--text-1);border:1px solid var(--border)', 'Unstake');
+  const row = el('div');
+  row.className = 'btn-row';
+  const stakeBtn = el('button', '', 'Stake');
+  stakeBtn.className = 'btn btn-primary';
+  const unstakeBtn = el('button', '', 'Unstake');
+  unstakeBtn.className = 'btn btn-ghost';
   stakeBtn.addEventListener('click', () => submit('stake', amountIn.value));
   unstakeBtn.addEventListener('click', () => submit('unstake', amountIn.value));
   row.appendChild(stakeBtn);
   row.appendChild(unstakeBtn);
-  card.appendChild(row);
+  container.appendChild(row);
 
-  container.appendChild(card);
+  if (window.lucide) window.lucide.createIcons();
 }
 
 async function submit(kind, rawAmount) {

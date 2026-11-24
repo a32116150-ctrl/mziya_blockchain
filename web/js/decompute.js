@@ -41,34 +41,35 @@ export function refreshBenchmark() {
 
 // ── Small DOM helpers ──
 
-function el(tag, css = '', text = '') {
+/** Create an element with a class name and optional text. */
+function el(tag, cls = '', text = '') {
   const e = document.createElement(tag);
-  if (css) e.style.cssText = css;
+  if (cls) e.className = cls;
   if (text) e.textContent = text;
   return e;
 }
 
-const CARD_CSS = 'background:var(--surface-3);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px';
-const SMALL_CSS = 'font-size:11px;color:var(--text-2);line-height:1.6';
-const SECTION_CSS = 'font-size:12px;font-weight:700;color:var(--text-1);margin:16px 0 8px';
+function icon(name) {
+  const i = document.createElement('i');
+  i.dataset.lucide = name;
+  return i;
+}
 
 function primaryButton(label, onClick, disabled = false) {
-  const b = el('button', disabled
-    ? 'width:100%;padding:10px;border-radius:6px;font-size:12px;font-weight:700;background:var(--surface-2);color:var(--text-3);border:1px solid var(--border);cursor:not-allowed'
-    : 'width:100%;padding:10px;border-radius:6px;font-size:12px;font-weight:700;background:var(--gold);color:#000;border:none;cursor:pointer;transition:opacity .2s', label);
+  const b = el('button', disabled ? 'btn btn-ghost btn-sm btn-full' : 'btn btn-primary btn-sm btn-full', label);
   b.disabled = disabled;
   if (!disabled) b.addEventListener('click', onClick);
   return b;
 }
 
 function secondaryButton(label, onClick) {
-  const b = el('button', 'padding:6px 10px;border-radius:6px;font-size:11px;font-weight:700;background:var(--surface-2);color:var(--text-1);border:1px solid var(--border);cursor:pointer', label);
+  const b = el('button', 'btn btn-ghost btn-xs', label);
   b.addEventListener('click', onClick);
   return b;
 }
 
 function input(placeholder, type = 'text', value = '') {
-  const i = el('input', 'width:100%;padding:8px;margin-bottom:6px;border-radius:6px;border:1px solid var(--border);background:var(--surface-2);color:var(--text-1);font-size:12px;box-sizing:border-box');
+  const i = el('input', 'form-input');
   i.placeholder = placeholder;
   i.type = type;
   i.value = value;
@@ -130,24 +131,24 @@ export function renderDecomputePanel() {
 
   container.textContent = '';
 
-  const header = el('div', 'display:flex;justify-content:space-between;align-items:center;margin-bottom:12px');
-  const title = el('span', 'font-size:13px;font-weight:700;color:var(--text-1);display:flex;align-items:center;gap:6px');
-  const icon = document.createElement('i');
-  icon.dataset.lucide = 'cpu';
-  icon.style.cssText = 'width:16px;height:16px';
-  title.appendChild(icon);
-  title.append(' DeCompute — Train for MZY');
+  const header = el('div', 'card-head');
+  const title = el('div', 'card-title');
+  const ico = el('span', 'ico');
+  ico.appendChild(icon('cpu'));
+  title.appendChild(ico);
+  title.append('AI Compute Market');
   header.appendChild(title);
-  const bmBtn = el('button', 'font-size:10px;color:var(--yellow);background:var(--yellow-dim);border:1px solid rgba(240,185,11,0.3);border-radius:4px;padding:2px 8px;cursor:pointer', 'Benchmark');
+  const bmBtn = el('button', 'pill violet', `⚡ ${sf.toFixed(2)}× speed`);
+  bmBtn.title = 'Re-run device benchmark';
   bmBtn.addEventListener('click', refreshBenchmark);
   header.appendChild(bmBtn);
   container.appendChild(header);
 
-  container.appendChild(el('div', 'font-size:11px;color:var(--text-2);margin-bottom:12px',
-    `Your device speedFactor: ${sf.toFixed(2)} · Paid models pay MZY after a verifier confirms your accuracy.`));
+  container.appendChild(el('p', 'card-desc',
+    'Companies lock MZY to get models trained. Train on your device, and get paid once a verifier confirms your accuracy.'));
 
   if (models.length === 0) {
-    container.appendChild(el('p', 'font-size:12px;color:var(--text-3);padding:16px 0;text-align:center', 'No models available for training. Check back later.'));
+    container.appendChild(el('p', 'empty-sub', 'No models available for training. Check back later.'));
   }
 
   for (const model of models) container.appendChild(renderModelCard(model, sf, addr, height));
@@ -163,16 +164,16 @@ export function renderDecomputePanel() {
 
 function renderModelCard(model, sf, addr, height) {
   const reg = app.blockchain.models;
-  const card = el('div', CARD_CSS);
+  const card = el('div', 'model-card');
 
-  const nameRow = el('div', 'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px');
-  nameRow.appendChild(el('span', 'font-size:13px;font-weight:700;color:var(--gold);font-family:monospace', model.modelId));
-  nameRow.appendChild(el('span', 'font-size:11px;color:var(--text-2)', model.practice
-    ? 'Practice · PoI bonus only'
-    : `${formatMZY(reg.availableEscrow(model.modelId, height), 2)} MZY available`));
+  const nameRow = el('div', 'model-top');
+  nameRow.appendChild(el('span', 'model-name', model.modelId));
+  nameRow.appendChild(el('span', model.practice ? 'badge badge-gray' : 'badge badge-green', model.practice
+    ? 'Practice · PoI'
+    : `${formatMZY(reg.availableEscrow(model.modelId, height), 2)} MZY`));
   card.appendChild(nameRow);
 
-  const details = el('div', SMALL_CSS + ';margin-bottom:10px');
+  const details = el('div', 'model-meta');
   details.appendChild(el('div', '', `Provider: ${String(model.provider).slice(0, 10)}...`));
   details.appendChild(el('div', '', `Accuracy target: ${(model.maxExpectedAccuracy * 100).toFixed(0)}%`));
   if (!model.practice) {
@@ -301,12 +302,14 @@ function renderVerifyQueue(container, addr, height) {
   });
   if (pending.length === 0) return;
 
-  container.appendChild(el('div', SECTION_CSS, `Verify & Earn (${pending.length} waiting)`));
+  container.appendChild(el('div', 'sub-head', `Verify & earn · ${pending.length} waiting`));
   for (const sub of pending.slice(0, 10)) {
-    const card = el('div', CARD_CSS);
-    card.appendChild(el('div', SMALL_CSS,
-      `${sub.modelId} · trainer ${sub.trainer.slice(0, 10)}… claims ${(sub.accuracy * 100).toFixed(1)}%`));
-    card.appendChild(el('div', SMALL_CSS + ';margin-bottom:8px',
+    const card = el('div', 'model-card');
+    const top = el('div', 'model-top');
+    top.appendChild(el('span', 'model-name', sub.modelId));
+    top.appendChild(el('span', 'badge badge-yellow', `claims ${(sub.accuracy * 100).toFixed(1)}%`));
+    card.appendChild(top);
+    card.appendChild(el('div', 'model-meta',
       `Pays trainer ${formatMZY(sub.payout, 4)} MZY · you earn ${formatMZY(sub.verifierFee, 4)} MZY · expires in ${sub.blockIndex + DECOMPUTE.VERIFICATION_WINDOW_BLOCKS - height} blocks`));
     card.appendChild(primaryButton('Re-check & Verify', () => handleVerify(sub)));
     container.appendChild(card);
@@ -354,13 +357,16 @@ function renderMyModels(container, addr, height) {
   const mine = [...reg.models.values()].filter(m => m.provider === addr);
   if (mine.length === 0) return;
 
-  container.appendChild(el('div', SECTION_CSS, 'My Models'));
+  container.appendChild(el('div', 'sub-head', 'My models'));
   for (const model of mine) {
-    const card = el('div', CARD_CSS);
-    card.appendChild(el('div', 'font-size:12px;font-weight:700;color:var(--gold);font-family:monospace;margin-bottom:4px', model.modelId));
+    const card = el('div', 'model-card');
+    const top = el('div', 'model-top');
+    top.appendChild(el('span', 'model-name', model.modelId));
+    top.appendChild(el('span', model.status === 'active' ? 'badge badge-green' : 'badge badge-gray', model.status));
+    card.appendChild(top);
     const pendingCount = reg.getPendingSubmissions(model.modelId, height).length;
-    card.appendChild(el('div', SMALL_CSS + ';margin-bottom:8px',
-      `${model.status} · escrow left ${formatMZY(model.remainingEscrow, 2)} MZY · paid out ${formatMZY(model.paidOut, 2)} MZY · ${pendingCount} pending`));
+    card.appendChild(el('div', 'model-meta',
+      `Escrow left ${formatMZY(model.remainingEscrow, 2)} MZY · paid out ${formatMZY(model.paidOut, 2)} MZY · ${pendingCount} pending`));
     if (model.status === 'active') {
       card.appendChild(secondaryButton(pendingCount ? 'Verify pending first' : 'Withdraw escrow', async () => {
         if (pendingCount) { toast('Verify or wait out pending submissions before withdrawing.', 'info'); return; }
@@ -379,18 +385,18 @@ function renderMyModels(container, addr, height) {
 // ── Provider: deploy ──
 
 function renderDeployForm(container) {
-  const details = document.createElement('details');
-  details.style.cssText = 'margin-top:12px';
-  const summary = el('summary', 'font-size:12px;font-weight:700;color:var(--text-1);cursor:pointer', 'Deploy a model (companies)');
+  const details = el('details', 'deploy');
+  const summary = el('summary', '', 'Deploy a model · for companies');
   details.appendChild(summary);
 
-  const box = el('div', CARD_CSS + ';margin-top:8px');
-  box.appendChild(el('div', SMALL_CSS + ';margin-bottom:8px',
+  const box = el('div', 'deploy-body');
+  box.appendChild(el('p', 'card-desc',
     'Lock MZY in escrow. Trainers are paid from it only after their accuracy is verified. Uses the built-in 4-input classifier architecture.'));
   const idIn = input('Model ID (e.g. acme-classifier-v1)');
   const escrowIn = input('Escrow (MZY)', 'number');
   const payoutIn = input('Payout per verified submission (MZY)', 'number');
   const targetIn = input('Target accuracy (0.5 – 1.0)', 'number', '0.9');
+  box.lastChild.style.marginBottom = '12px';
   [idIn, escrowIn, payoutIn, targetIn].forEach(i => box.appendChild(i));
 
   box.appendChild(primaryButton('Deploy & Lock Escrow', async () => {

@@ -354,10 +354,12 @@ function showQR() {
   const qrEl = document.getElementById('wallet-qr');
   if (qrEl) {
     qrEl.innerHTML = '';
-    if (window.QRCode) {
-      try {
-        new QRCode(qrEl, { text: app.wallet.address, width: 160, height: 160, colorDark: '#0B0E11', colorLight: '#ffffff' });
-      } catch (e) { }
+    if (window.MziyaQR) {
+      const canvas = document.createElement('canvas');
+      qrEl.appendChild(canvas);
+      window.MziyaQR.toCanvas(canvas, app.wallet.address, {
+        width: 184, margin: 0, color: { dark: '#1E1B4B', light: '#FFFFFF' },
+      }).catch(() => {});
     }
   }
   const addrEl = document.getElementById('qr-address');
@@ -392,7 +394,7 @@ async function showMnemonicWarning() {
       const words = mnemonic.split(' ');
       words.forEach((w, i) => {
         const item = document.createElement('div');
-        item.style.cssText = 'background:var(--surface-2);border:1px solid var(--border);padding:8px;border-radius:var(--radius-sm);font-size:12px;font-family:IBM Plex Mono,monospace;color:var(--text-1);text-align:left;display:flex;align-items:center';
+        item.style.cssText = 'background:var(--surface-2);border:1px solid var(--border);padding:8px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--font-mono);color:var(--text-1);text-align:left;display:flex;align-items:center';
         
         const num = document.createElement('span');
         num.style.cssText = 'color:var(--text-3);margin-right:6px;font-weight:700';

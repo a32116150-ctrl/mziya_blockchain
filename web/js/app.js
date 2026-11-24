@@ -1,3 +1,4 @@
+import './vendor.js';
 import { Blockchain } from '../../core/blockchain.js';
 import { MiningManager, getCurrentMiningRate } from '../../core/mining.js';
 import { isValidAddress } from '../../core/wallet.js';
@@ -99,13 +100,21 @@ export function clearWallet() {
 function updateAppWalletMode() {
   const appEl = document.getElementById('app');
   const lockBtn = document.getElementById('btn-lock');
+  document.body.classList.toggle('no-wallet-mode', !App.wallet);
   if (!App.wallet) {
     appEl?.classList.add('no-wallet-mode');
     if (lockBtn) lockBtn.style.display = 'none';
     navigateTo('wallet');
   } else {
     appEl?.classList.remove('no-wallet-mode');
-    if (lockBtn && !App.locked) lockBtn.style.display = 'block';
+    if (lockBtn && !App.locked) lockBtn.style.display = '';
+  }
+  const chip = document.getElementById('top-addr');
+  const chipText = document.getElementById('top-addr-text');
+  if (chip && chipText) {
+    const a = App.wallet?.address;
+    chip.style.display = a ? '' : 'none';
+    if (a) chipText.textContent = `${a.slice(0, 6)}…${a.slice(-4)}`;
   }
   renderWalletPage();
   renderSettings();
@@ -316,9 +325,9 @@ export function showLockScreen(show) {
     m.style.display = 'none';
     document.getElementById('bottom-nav').style.display = 'flex';
     const lockBtn = document.getElementById('btn-lock');
-    if (lockBtn) lockBtn.style.display = App.wallet ? 'block' : 'none';
+    if (lockBtn) lockBtn.style.display = App.wallet ? '' : 'none';
     const notifBtn = document.getElementById('btn-notif');
-    if (notifBtn) notifBtn.style.display = 'block';
+    if (notifBtn) notifBtn.style.display = '';
   }
   if (window.lucide) lucide.createIcons();
 }
@@ -548,7 +557,7 @@ function renderTxHistory() {
       AI_SUBMISSION: ['AI Submission', 'Network'],
     }[tx.type];
     const isIn = (tx.to === addr && tx.from !== addr && !mine) || tx.type === 'UNSTAKE';
-    const cls = mine ? 'mine' : isIn ? 'in' : 'out';
+    const cls = mine ? 'mine' : !tx.amount ? 'neutral' : isIn ? 'in' : 'out';
     const label = mine ? 'Mining Reward' : special ? special[0] : isIn ? 'Received' : 'Sent';
     const sign = (mine || isIn) ? '+' : (tx.amount ? '-' : '');
     const other = mine ? 'Network' : special ? special[1] : isIn ? (tx.from || 'Network') : tx.to;
@@ -559,7 +568,10 @@ function renderTxHistory() {
     const icon = document.createElement('div');
     icon.className = 'tx-icon ' + cls;
     const iEl = document.createElement('i');
-    iEl.dataset.lucide = mine ? 'zap' : isIn ? 'arrow-down-left' : 'arrow-up-right';
+    iEl.dataset.lucide = mine ? 'zap'
+      : { MINING_START: 'radio', STAKE: 'layers', UNSTAKE: 'layers', MODEL_DEPLOY: 'cpu', MODEL_WITHDRAW: 'cpu',
+          TRAINING_SUBMIT: 'brain', TRAINING_VERIFY: 'shield-check', AI_SUBMISSION: 'brain' }[tx.type]
+      || (isIn ? 'arrow-down-left' : 'arrow-up-right');
     icon.appendChild(iEl);
     item.appendChild(icon);
 
@@ -579,7 +591,7 @@ function renderTxHistory() {
     right.className = 'tx-right';
     const amtDiv = document.createElement('div');
     amtDiv.className = 'tx-amount ' + cls;
-    amtDiv.textContent = sign + formatMZY(tx.amount);
+    amtDiv.textContent = tx.amount ? sign + formatMZY(tx.amount) : '—';
     right.appendChild(amtDiv);
     const timeDiv = document.createElement('div');
     timeDiv.className = 'tx-time';
@@ -1068,6 +1080,7 @@ function getCopilotResponse(userText) {
 function bindCopilotEvents() {
   document.getElementById('btn-open-copilot')?.addEventListener('click', openCopilot);
   document.getElementById('btn-floating-copilot')?.addEventListener('click', openCopilot);
+  document.getElementById('btn-notif')?.addEventListener('click', openCopilot);
   document.getElementById('btn-copilot-send')?.addEventListener('click', () => sendCopilotMsg());
   document.getElementById('copilot-input')?.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendCopilotMsg(); });
   document.getElementById('btn-close-copilot')?.addEventListener('click', closeModals);
@@ -1235,74 +1248,47 @@ export function truncate(str, start = 6, end = 4) {
 function startBackgroundCanvas() {
   const canvas = document.getElementById('bg-canvas');
   if (!canvas) return;
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
   const ctx = canvas.getContext('2d');
-  let W, H, particles = [];
-  const PARTICLE_COUNT = 60;
-  const GOLD = [255, 200, 50];
-  const VIOLET = [124, 92, 252];
-
-  function resize() {
-    W = canvas.width = window.innerWidth;
-    H = canvas.height = window.innerHeight;
-  }
-
-  function createParticle() {
-    const useGold = Math.random() > 0.5;
-    const color = useGold ? GOLD : VIOLET;
-    return {
-      x: Math.random() * W, y: Math.random() * H,
-      vx: (Math.random() - 0.5) * 0.3, vy: (Math.random() - 0.5) * 0.3,
-      r: Math.random() * 1.5 + 0.5, color, alpha: Math.random() * 0.4 + 0.1,
-    };
-  }
-
-  function initParticles() {
-    particles = Array.from({ length: PARTICLE_COUNT }, createParticle);
-  }
-
-  function drawHexagon(ctx, x, y, size, alpha) {
-    ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.strokeStyle = `rgba(255, 200, 50, ${alpha})`;
-    ctx.lineWidth = 0.5;
-    ctx.beginPath();
-    for (let i = 0; i < 6; i++) {
-      const angle = (Math.PI / 3) * i - Math.PI / 6;
-      const px = x + size * Math.cos(angle);
-      const py = y + size * Math.sin(angle);
-      i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
-    }
-    ctx.closePath();
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  let frame = 0;
+  const COLORS = [[167, 139, 250], [34, 211, 238], [52, 211, 153]];
+  const LINK = 130;
+  let W, H, dpr, particles = [];
   let isVisible = true;
 
-  // PERF-02: Pause canvas when tab is hidden
-  document.addEventListener('visibilitychange', () => {
-    isVisible = !document.hidden;
-  });
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const count = Math.round(Math.min(70, (W * H) / 22000));
+    particles = Array.from({ length: count }, () => ({
+      x: Math.random() * W, y: Math.random() * H,
+      vx: (Math.random() - 0.5) * 0.22, vy: (Math.random() - 0.5) * 0.22,
+      r: Math.random() * 1.4 + 0.4,
+      c: COLORS[Math.floor(Math.random() * COLORS.length)],
+      a: Math.random() * 0.5 + 0.2,
+    }));
+  }
+
+  // PERF-02: pause when the tab is hidden
+  document.addEventListener('visibilitychange', () => { isVisible = !document.hidden; });
 
   function draw() {
-    if (!isVisible) { requestAnimationFrame(draw); return; }
+    requestAnimationFrame(draw);
+    if (!isVisible) return;
     ctx.clearRect(0, 0, W, H);
-    // PERF-02: Use squared distances to avoid Math.sqrt
-    const CONNECTION_DIST_SQ = 120 * 120; // 14400
     for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
       for (let j = i + 1; j < particles.length; j++) {
-        const dx = particles[i].x - particles[j].x;
-        const dy = particles[i].y - particles[j].y;
-        const distSq = dx * dx + dy * dy;
-        if (distSq < CONNECTION_DIST_SQ) {
-          const alpha = (1 - Math.sqrt(distSq) / 120) * 0.12;
-          ctx.beginPath();
-          ctx.strokeStyle = `rgba(255, 200, 50, ${alpha})`;
-          ctx.lineWidth = 0.5;
-          ctx.moveTo(particles[i].x, particles[i].y);
-          ctx.lineTo(particles[j].x, particles[j].y);
-          ctx.stroke();
+        const q = particles[j];
+        const dx = p.x - q.x, dy = p.y - q.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < LINK * LINK) {
+          const alpha = (1 - Math.sqrt(d2) / LINK) * 0.14;
+          ctx.strokeStyle = `rgba(${p.c.join(',')}, ${alpha})`;
+          ctx.lineWidth = 0.6;
+          ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke();
         }
       }
     }
@@ -1312,22 +1298,17 @@ function startBackgroundCanvas() {
       if (p.y < 0) p.y = H; if (p.y > H) p.y = 0;
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(${p.color.join(',')}, ${p.alpha})`;
+      ctx.fillStyle = `rgba(${p.c.join(',')}, ${p.a})`;
+      ctx.shadowColor = `rgba(${p.c.join(',')}, 0.9)`;
+      ctx.shadowBlur = 6;
       ctx.fill();
+      ctx.shadowBlur = 0;
     }
-    if (frame % 180 === 0) {
-      const hx = Math.random() * W;
-      const hy = Math.random() * H;
-      drawHexagon(ctx, hx, hy, 20 + Math.random() * 40, 0.04 + Math.random() * 0.06);
-    }
-    frame++;
-    requestAnimationFrame(draw);
   }
 
   resize();
-  initParticles();
   draw();
-  window.addEventListener('resize', () => { resize(); initParticles(); });
+  window.addEventListener('resize', resize);
 }
 
 // ── IndexedDB Storage Wrapper ──

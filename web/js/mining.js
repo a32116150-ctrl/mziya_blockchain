@@ -16,6 +16,17 @@ export async function initMinePage(appRef) {
   updatePoIBonusDisplay();
 }
 
+
+/** Drive the reactor visuals: progress ring (0–100), hint line and state pill. */
+function setReactor(pct, hint, state) {
+  const stage = document.querySelector('.orb-stage');
+  if (stage) stage.style.setProperty('--p', String(Math.max(0, Math.min(100, pct))));
+  const hintEl = document.getElementById('reactor-hint');
+  if (hintEl && hint) hintEl.textContent = hint;
+  const stateEl = document.getElementById('reactor-state');
+  if (stateEl && state) stateEl.lastChild.textContent = state;
+}
+
 async function handleMineClick() {
   if (!app.wallet) {
     showToast('Create a wallet first to start mining!', '◈', 'error');
@@ -152,6 +163,7 @@ function updateSessionUI(session) {
 
   const pct = session.progressPercent;
   if (fillEl) fillEl.style.width = `${pct}%`;
+  if (session.active) setReactor(pct, `Mining… ${session.remainingHuman} left. Rewards are claimable when the ring is full.`, 'Mining');
   if (pctEl) pctEl.textContent = `${Math.round(pct)}%`;
 
   const balance = app.blockchain.getBalance(app.wallet?.address || '');
@@ -184,6 +196,7 @@ function startSessionTick(session) {
 }
 
 function showReadyToClaim() {
+  setReactor(100, 'Session complete — tap the reactor to claim your MZY.', 'Ready to claim');
   const orb = document.getElementById('mine-btn');
   const orbLabel = document.getElementById('mine-btn-label');
   orb?.classList.remove('mining');
@@ -192,6 +205,7 @@ function showReadyToClaim() {
 }
 
 function showStartState() {
+  setReactor(0, 'Tap the reactor to start a 24-hour session. Come back to claim.', '24h sessions');
   const orb = document.getElementById('mine-btn');
   const orbLabel = document.getElementById('mine-btn-label');
   orb?.classList.remove('mining');

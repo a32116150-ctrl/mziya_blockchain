@@ -56,13 +56,14 @@ export function renderExplorer() {
     item.addEventListener('click', () => showBlockDetail(hash));
 
     const left = document.createElement('div');
+    left.className = 'block-left';
     const idx = document.createElement('div');
     idx.className = 'block-index';
     idx.textContent = '#' + block.index;
     left.appendChild(idx);
     const h = document.createElement('div');
     h.className = 'block-hash';
-    h.textContent = hash.slice(0, 24) + '...';
+    h.textContent = hash;
     left.appendChild(h);
     item.appendChild(left);
 

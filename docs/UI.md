@@ -1,6 +1,6 @@
 # Mziya UI Architecture
 
-> File: `web/index.html` · `web/js/app.js` · `web/js/wallet.js` · `web/js/mining.js`
+> File: `web/index.html` · `web/css/theme.css` · `web/js/vendor.js` · `web/js/app.js` · `web/js/wallet.js` · `web/js/mining.js`
 
 ---
 
@@ -9,7 +9,9 @@
 - **Build**: Vite (ES modules, HMR, static build to `web/dist/`)
 - **Runtime**: Vanilla JS (no React/Vue/Svelte)
 - **State**: In-memory global state (`STATE` object in app.js) + localStorage/IndexedDB for persistence
-- **Styling**: CSS custom properties in `index.html` `<style>`, no external CSS files
+- **Styling**: "Aurora" design system in `web/css/theme.css`: dark, frosted-glass cards, violet→cyan holographic accents, animated aurora background, mining "reactor" orb with a progress ring. Fonts: Space Grotesk (display), Inter (body), JetBrains Mono (data). Legacy variable names (`--surface-*`, `--yellow`, `--gold`…) are kept as aliases.
+- **Bundled assets** (`web/js/vendor.js`): Lucide icons (only the ones used), fonts and the QR-code library are installed from npm and bundled by Vite, so the PWA works offline. No CDN scripts on the main page.
+- **Layout**: floating glass dock on phones; fixed sidebar from 900px wide. Copilot opens from the top-bar ✦ button on phones and a floating button on desktop.
 - **PWA**: Service worker (`sw.js`), Web App Manifest (`manifest.json`), 512×512 icon
 
 ---
