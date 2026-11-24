@@ -1,5 +1,5 @@
 import { getCurrentMiningRate } from '../../core/mining.js';
-import { formatMZY, showToast, ensureUnlocked, saveChain } from './app.js';
+import { formatMZY, showToast, ensureUnlocked, saveChain, requestPrivateKey } from './app.js';
 
 let app;
 let tickTimer = null;
@@ -31,7 +31,10 @@ async function handleMineClick() {
   try {
     const session = app.miningManager.getSession(app.wallet.address);
 
-    if (!session || !session.active) {
+    if (session && !session.active) {
+      await claimReward();          // finished session → claim it
+      if (mineBtn) mineBtn.disabled = false;
+    } else if (!session) {
       await startMining();
     } else {
       await confirmActivity();
@@ -42,11 +45,28 @@ async function handleMineClick() {
   }
 }
 
+function p2pCallbacks() {
+  return {
+    broadcastTx: app.p2p?.isRunning ? (tx) => app.p2p.broadcastTransaction(tx) : undefined,
+    broadcastBlock: app.p2p?.isRunning ? (block) => app.p2p.broadcastBlock(block) : undefined,
+  };
+}
+
 async function startMining() {
+  const privateKey = await requestPrivateKey('Start Mining', 'Enter your wallet password to sign the mining-session start:');
+  if (!privateKey) {
+    const mineBtn = document.getElementById('mine-btn');
+    if (mineBtn) mineBtn.disabled = false;
+    return;
+  }
+
   const result = await app.miningManager.startSession(app.wallet.address, {
+    privateKey,
+    blockchain: app.blockchain,
     referrals: 0,
-    isValidator: false,
+    ...p2pCallbacks(),
   });
+  await saveChain();
 
   if (result.error) {
     showToast(result.error, '✕', 'error');
@@ -57,7 +77,9 @@ async function startMining() {
 
   showMiningActive(result.session);
   startSessionTick(result.session);
-  showToast('Mining session started! MZY is flowing.', '⬡', 'success');
+  showToast(result.pending
+    ? 'Session start sent — it begins once a block includes it.'
+    : 'Mining session started on-chain! MZY is flowing.', '⬡', 'success');
 
   if (app.p2p?.isRunning) {
     await app.p2p.broadcastMiningActivity({
@@ -84,11 +106,13 @@ async function confirmActivity() {
 async function resumeSession() {
   if (!app.wallet) return;
 
-  const session = await app.miningManager.loadSession(app.wallet.address);
+  const session = await app.miningManager.loadSession(app.wallet.address, app.blockchain);
   const orb = document.getElementById('mine-btn');
   if (session && session.active) {
     showMiningActive(session);
     startSessionTick(session);
+  } else if (session) {
+    showReadyToClaim();
   } else {
     if (orb) orb.disabled = false;
     const orbLabel = document.getElementById('mine-btn-label');
@@ -159,37 +183,47 @@ function startSessionTick(session) {
   }, 1000);
 }
 
-async function onSessionExpired(session) {
+function showReadyToClaim() {
   const orb = document.getElementById('mine-btn');
   const orbLabel = document.getElementById('mine-btn-label');
+  orb?.classList.remove('mining');
+  if (orb) orb.disabled = false;
+  if (orbLabel) orbLabel.textContent = 'CLAIM';
+}
 
+function showStartState() {
+  const orb = document.getElementById('mine-btn');
+  const orbLabel = document.getElementById('mine-btn-label');
   orb?.classList.remove('mining');
   if (orb) orb.disabled = false;
   if (orbLabel) orbLabel.textContent = 'START';
+}
 
-  showToast('Session complete! Processing reward...', '⬡', 'success');
-
-  if (app.wallet && session) {
-    await claimReward();
-  }
+async function onSessionExpired(session) {
+  if (!session) { showStartState(); return; }
+  showReadyToClaim();
+  showToast('Session complete! Tap CLAIM to collect your MZY.', '⬡', 'success');
 }
 
 async function claimReward() {
-  try {
-    const broadcastTx = app.p2p?.isRunning ? (tx) => app.p2p.broadcastTransaction(tx) : undefined;
-    const broadcastBlock = app.p2p?.isRunning ? (block) => app.p2p.broadcastBlock(block) : undefined;
+  const privateKey = await requestPrivateKey('Claim Mining Reward', 'Enter your wallet password to sign the reward claim:');
+  if (!privateKey) return;
 
+  try {
+    const { broadcastTx, broadcastBlock } = p2pCallbacks();
     const result = await app.miningManager.claimReward(
       app.wallet.address,
       app.blockchain,
       broadcastTx,
-      broadcastBlock
+      broadcastBlock,
+      privateKey
     );
 
     if (result.error) {
       showToast(result.error, '✕', 'error');
       return;
     }
+    showStartState();
 
     saveChain();
 
@@ -203,7 +237,8 @@ async function claimReward() {
     }
 
     const bonusStr = result.poiBonus > 0 ? ` (+${formatMZY(result.poiBonus)} AI bonus)` : '';
-    showToast(`Reward claimed! ${formatMZY(result.amount)} MZY${bonusStr}`, '✓', 'success');
+    const waitStr = result.included ? '' : ' — waiting for a validator to include it';
+    showToast(`Reward claimed! ${formatMZY(result.amount)} MZY${bonusStr}${waitStr}`, '✓', 'success');
   } catch (e) {
     console.warn('[Mining] Claim error:', e);
     showToast('Claim failed: ' + e.message, '✕', 'error');
@@ -218,23 +253,9 @@ async function claimReward() {
 
 function updatePoIBonusDisplay() {
   if (!app.wallet) return;
-  const addr = app.wallet.address;
-  let bestAcc = 0;
-
-  const session = app.miningManager.getSession(addr);
-  const cutoffTime = session ? session.startTime : (Date.now() - 24 * 60 * 60 * 1000);
-
-  if (app.blockchain?.chain) {
-    for (const block of app.blockchain.chain) {
-      if (block.timestamp >= cutoffTime) {
-        for (const tx of block.transactions) {
-          if (tx.type === 'AI_SUBMISSION' && tx.from === addr && tx.data?.accuracy) {
-            if (tx.data.accuracy > bestAcc) bestAcc = tx.data.accuracy;
-          }
-        }
-      }
-    }
-  }
+  // The bonus uses the best accuracy recorded on-chain during the open session
+  const session = app.blockchain.getPendingState().getMiningSession(app.wallet.address);
+  const bestAcc = session?.bestAccuracy || 0;
 
   const bonusPct = Math.round(bestAcc * 10 * 100) / 100;
   const el = document.getElementById('poi-bonus-pct');

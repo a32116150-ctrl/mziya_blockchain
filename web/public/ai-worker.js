@@ -28,8 +28,59 @@ function generateDeterministicDataset(seedHash, numSamples = 50) {
   return { inputs, labels };
 }
 
+function buildModel(modelConfig) {
+  const seq = tf.sequential();
+  for (const layer of modelConfig.layers) {
+    if (layer.type === 'dense') {
+      seq.add(tf.layers.dense({ units: layer.units, inputShape: layer.inputShape, activation: layer.activation }));
+    }
+  }
+  seq.compile({
+    optimizer: modelConfig.compile.optimizer,
+    loss: modelConfig.compile.loss,
+    metrics: modelConfig.compile.metrics || ['accuracy'],
+  });
+  return seq;
+}
+
+/** Load a flat weight array (in the order TRAIN exports it) into the model. */
+function setFlatWeights(seq, flat) {
+  let offset = 0;
+  for (const layer of seq.layers) {
+    const current = layer.getWeights();
+    const next = current.map((w) => {
+      const size = w.size;
+      if (offset + size > flat.length) throw new Error('Weight array is too short for this model');
+      const t = tf.tensor(flat.slice(offset, offset + size), w.shape);
+      offset += size;
+      return t;
+    });
+    layer.setWeights(next);
+  }
+  if (offset !== flat.length) throw new Error('Weight array does not match this model');
+}
+
 self.onmessage = async (e) => {
   const { action, modelConfig, seedHash } = e.data;
+
+  // Verifier: re-measure a submission's accuracy on the same held-out test set
+  if (action === 'EVALUATE') {
+    try {
+      const seq = buildModel(modelConfig);
+      setFlatWeights(seq, e.data.weights);
+      const testData = generateDeterministicDataset(seedHash + '-test', 50);
+      const testXs = tf.tensor2d(testData.inputs);
+      const testYs = tf.tensor2d(testData.labels);
+      const evalResult = seq.evaluate(testXs, testYs, { batchSize: 50, verbose: 0 });
+      const acc = (await evalResult[1].data())[0];
+      const accuracy = Math.min(0.99, Math.max(0.01, acc));
+      seq.dispose(); testXs.dispose(); testYs.dispose();
+      self.postMessage({ type: 'EVALUATED', accuracy });
+    } catch (err) {
+      self.postMessage({ type: 'ERROR', msg: err.message });
+    }
+    return;
+  }
 
   if (action === 'TRAIN') {
     try {

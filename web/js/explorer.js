@@ -149,7 +149,8 @@ function showBlockDetail(hash) {
       const left = document.createElement('div');
 
       const typeBadge = document.createElement('span');
-      typeBadge.className = 'badge ' + (tx.type === 'MINING' ? 'badge-yellow' : tx.type === 'AI_SUBMISSION' ? 'badge-green' : 'badge-gray');
+      typeBadge.className = 'badge ' + (tx.type === 'MINING' ? 'badge-yellow'
+        : ['AI_SUBMISSION', 'TRAINING_SUBMIT', 'TRAINING_VERIFY'].includes(tx.type) ? 'badge-green' : 'badge-gray');
       typeBadge.style.marginRight = '8px';
       typeBadge.textContent = tx.type || 'UNKNOWN';
       left.appendChild(typeBadge);
