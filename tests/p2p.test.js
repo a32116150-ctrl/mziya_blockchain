@@ -2,7 +2,8 @@ import { jest } from '@jest/globals';
 import { MziyaP2P, TOPICS } from '../network/peer.js';
 import { Blockchain } from '../core/blockchain.js';
 import { Mempool } from '../core/mempool.js';
-import { Transaction } from '../core/transaction.js';
+import { Transaction, createMiningStart } from '../core/transaction.js';
+import { walletFromPrivateKey } from '../core/wallet.js';
 import { Block } from '../core/block.js';
 
 describe('Mziya P2P Network Layer', () => {
@@ -24,32 +25,27 @@ describe('Mziya P2P Network Layer', () => {
     expect(p2p.peerCount).toBe(0);
   });
 
-  test('should handle incoming transactions via pubsub', () => {
-    let callbackTriggered = false;
-    p2p.onTransaction = (tx) => {
-      callbackTriggered = true;
-      expect(tx.amount).toBe(100);
-      expect(tx.to).toBe('MZrecipient123');
-    };
+  test('should validate incoming transactions before adding them to the mempool', () => {
+    const w = walletFromPrivateKey('0e'.repeat(32));
+    let received = null;
+    p2p.onTransaction = (tx) => { received = tx; };
 
-    const mockTx = new Transaction({
-      from: null,
-      to: 'MZrecipient123',
-      amount: 100,
-      type: 'MINING'
-    });
-    mockTx.txHash = mockTx.computeHash();
-
-    const mockPubsubMessage = {
+    const goodTx = createMiningStart({ address: w.address, nonce: 1, privateKey: w.privateKey });
+    p2p._handleMessage({
       topic: TOPICS.TRANSACTION,
-      data: new TextEncoder().encode(JSON.stringify(mockTx.toJSON()))
-    };
+      data: new TextEncoder().encode(JSON.stringify(goodTx.toJSON())),
+    });
 
-    p2p._handleMessage(mockPubsubMessage);
+    expect(blockchain.mempool.has(goodTx.txHash)).toBe(true);
+    expect(received?.txHash).toBe(goodTx.txHash);
 
-    expect(mempool.size).toBe(1);
-    expect(mempool.has(mockTx.txHash)).toBe(true);
-    expect(callbackTriggered).toBe(true);
+    // Unsigned free-mint attempt must be dropped
+    const badTx = new Transaction({ from: null, to: 'MZrecipient123', amount: 100, type: 'MINING' });
+    p2p._handleMessage({
+      topic: TOPICS.TRANSACTION,
+      data: new TextEncoder().encode(JSON.stringify(badTx.toJSON())),
+    });
+    expect(blockchain.mempool.size).toBe(1);
   });
 
   test('should handle incoming blocks via pubsub', () => {
@@ -113,13 +109,10 @@ describe('Mziya P2P Network Layer', () => {
 
     // Handle incoming SYNC_REQUEST from a peer who is shorter than us
     // Let's add a block first so we have height = 2
-    const mockBlock = new Block({
-      index: 1,
-      previousHash: blockchain.latestBlock.hash,
-      transactions: [],
-      miner: 'MZminer123'
-    });
-    blockchain.addBlock(mockBlock);
+    const w = walletFromPrivateKey('0f'.repeat(32));
+    blockchain.addPendingTransaction(createMiningStart({ address: w.address, nonce: 1, privateKey: w.privateKey }));
+    const realBlock = blockchain.forgeBlock(w.address, w.privateKey);
+    expect(blockchain.addBlock(realBlock).success).toBe(true);
 
     const mockRequestMsg = {
       topic: TOPICS.SYNC,

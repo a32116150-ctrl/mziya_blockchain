@@ -1,5 +1,7 @@
 # Mziya Mining Engine & Tokenomics
 
+> **Note:** the current consensus rules for mining claims, fees, staking and DeCompute payouts are in [ECONOMY.md](ECONOMY.md). Where this page disagrees, ECONOMY.md is correct.
+
 > Files: `core/mining.js` · `web/js/mining.js`
 
 ---

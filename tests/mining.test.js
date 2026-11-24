@@ -1,6 +1,7 @@
 import { jest } from '@jest/globals';
 import { getCurrentMiningRate, calculateSessionEarnings, MiningSession, MiningManager, TOKENOMICS } from '../core/mining.js';
 import { Blockchain } from '../core/blockchain.js';
+import { walletFromPrivateKey } from '../core/wallet.js';
 
 describe('Mining Engine', () => {
   describe('getCurrentMiningRate', () => {
@@ -73,25 +74,36 @@ describe('Mining Engine', () => {
     });
 
     it('starts and confirms active sessions', async () => {
-      const addr = 'MZminer';
-      const startRes = await manager.startSession(addr, { referrals: 1, isValidator: false });
-      expect(startRes.session).toBeDefined();
-      expect(startRes.session.active).toBe(true);
-
-      const confirmRes = await manager.confirmActivity(addr);
-      expect(confirmRes.session).toBeDefined();
-      expect(confirmRes.earned).toBeDefined();
-    });
-
-    it('prevents claiming a reward from active session', async () => {
-      const addr = 'MZminer';
+      const w = walletFromPrivateKey('0c'.repeat(32));
       const blockchain = new Blockchain();
       blockchain.initialize();
 
-      await manager.startSession(addr);
-      
-      const claimRes = await manager.claimReward(addr, blockchain);
+      const startRes = await manager.startSession(w.address, { privateKey: w.privateKey, blockchain });
+      expect(startRes.error).toBeUndefined();
+      expect(startRes.session.active).toBe(true);
+      expect(blockchain.utxo.getMiningSession(w.address)).not.toBeNull();
+
+      const confirmRes = await manager.confirmActivity(w.address);
+      expect(confirmRes.session).toBeDefined();
+      expect(confirmRes.earned).toBeDefined();
+      blockchain.consensusEngine.stop();
+    });
+
+    it('refuses to start without a key', async () => {
+      const res = await manager.startSession('MZminer', {});
+      expect(res.error).toMatch(/private key/);
+    });
+
+    it('prevents claiming a reward from active session', async () => {
+      const w = walletFromPrivateKey('0d'.repeat(32));
+      const blockchain = new Blockchain();
+      blockchain.initialize();
+
+      await manager.startSession(w.address, { privateKey: w.privateKey, blockchain });
+
+      const claimRes = await manager.claimReward(w.address, blockchain, null, null, w.privateKey);
       expect(claimRes.error).toBe('Session must be completed before claiming');
+      blockchain.consensusEngine.stop();
     });
   });
 });

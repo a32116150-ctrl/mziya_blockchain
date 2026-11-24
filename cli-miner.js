@@ -167,7 +167,8 @@ async function run() {
     if (stored) {
       const chainData = JSON.parse(stored);
       if (chainData && chainData.length > 1) {
-        blockchain = Blockchain.fromJSON(chainData);
+        blockchain.consensusEngine?.stop();
+        blockchain = Blockchain.fromJSON(chainData).initialize();
         console.log(`📦 ${BOLD}Loaded Chain Height:${RESET} ${CYAN}${blockchain.length}${RESET}`);
       }
     }
@@ -193,7 +194,7 @@ async function run() {
   const miningManager = new MiningManager(miningStorage);
   
   // Catch up existing session
-  await miningManager.loadSession(wallet.address);
+  await miningManager.loadSession(wallet.address, blockchain);
   miningManager.startTicking(60000);
 
   // 4. Start P2P
@@ -223,12 +224,17 @@ async function run() {
   console.log(`🚀 ${BOLD}Mining Cycle Status:${RESET}`);
 
   // 5. Mining cycle runner
+  let lastCycleAttempt = 0;
   const checkMiningState = async () => {
     let session = miningManager.getSession(wallet.address);
     
     if (session && session.active && Date.now() < session.endTime) {
       // Session is actively running
     } else {
+      // Retry claims/starts at most once a minute
+      if (Date.now() - lastCycleAttempt < 60_000) return;
+      lastCycleAttempt = Date.now();
+
       const currentSession = miningManager.getSession(wallet.address);
       if (currentSession && !currentSession.active) {
         console.log(`\n🎁 ${BOLD}Mining session completed! Claiming reward...${RESET}`);
@@ -239,11 +245,13 @@ async function run() {
           wallet.address,
           blockchain,
           broadcastTx,
-          broadcastBlock
+          broadcastBlock,
+          wallet.privateKey
         );
 
         if (result.error) {
-          console.error(`${RED}✕ Claim failed:${RESET} ${result.error}`);
+          console.error(`${RED}✕ Claim failed:${RESET} ${result.error} ${GRAY}(retrying in 1 min)${RESET}`);
+          return;
         } else {
           const newBalance = blockchain.utxo?.getBalance(wallet.address) || 0;
           console.log(`${GREEN}✓ Reward claimed!${RESET} ${GOLD}+${result.amount.toFixed(6)} MZY${RESET} → ${VIOLET}Wallet balance: ${newBalance.toFixed(6)} MZY${RESET}`);
@@ -253,9 +261,13 @@ async function run() {
 
       console.log(`🚀 ${BOLD}Starting new 24h mining session...${RESET}`);
       const startResult = await miningManager.startSession(wallet.address, {
+        privateKey: wallet.privateKey,
+        blockchain,
         referrals: 0,
-        isValidator: false
+        broadcastTx: p2p.isRunning ? (tx) => p2p.broadcastTransaction(tx) : undefined,
+        broadcastBlock: p2p.isRunning ? (b) => p2p.broadcastBlock(b) : undefined,
       });
+      await saveChain();
 
       if (startResult.error) {
         console.error(`${RED}✕ Failed to start session:${RESET} ${startResult.error}`);

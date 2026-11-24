@@ -91,7 +91,7 @@ async function handleSend() {
     // Decrypt private key (only in memory, for signing)
     const privateKey = await decryptPrivateKey(app.wallet.privateKeyEncrypted, password);
 
-    const nonce = app.blockchain.utxo.getNonce(app.wallet.address) + 1;
+    const nonce = app.blockchain.getNextNonce(app.wallet.address);
 
     // Create and sign transaction locally
     const tx = createTransfer({
@@ -125,7 +125,7 @@ async function handleSend() {
 
     // In local mode (no peers), forge a block immediately for demo
     if (!app.p2p?.isRunning || app.p2p.peerCount === 0) {
-      const block = app.blockchain.forgeBlock(app.wallet.address);
+      const block = app.blockchain.forgeBlock(app.wallet.address, privateKey);
       if (block) {
         app.blockchain.addBlock(block);
         saveChain();

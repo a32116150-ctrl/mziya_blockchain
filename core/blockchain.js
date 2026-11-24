@@ -1,9 +1,7 @@
-import { Block, createGenesisBlock, hashData, canonicalStringify } from './block.js';
-import { AccountState, Transaction, TX_TYPE, sortTransactions } from './transaction.js';
+import { Block, createGenesisBlock, canonicalStringify } from './block.js';
+import { AccountState, Transaction, sortTransactions } from './transaction.js';
 import { Mempool } from './mempool.js';
-import { ConsensusEngine, ValidatorSet, selectBlockProposer } from './consensus.js';
-import { ModelRegistry, getDefaultModel } from './decompute.js';
-import { TOKENOMICS } from './mining.js';
+import { ConsensusEngine, ValidatorSet } from './consensus.js';
 
 export function aggregateAIWeights(transactions, prevModelStates = {}) {
   const nextStates = JSON.parse(JSON.stringify(prevModelStates || {}));
@@ -48,6 +46,72 @@ export function aggregateAIWeights(transactions, prevModelStates = {}) {
   return nextStates;
 }
 
+const MAX_TXS_PER_BLOCK = 500;
+
+/** Genesis state: what every node agrees on before block 1. */
+function genesisState(genesisBlock) {
+  const state = new AccountState();
+  state.applyBlock(genesisBlock);
+  return state;
+}
+
+/**
+ * Validate `block` on top of `prev` given the state after `prev`.
+ * Never mutates `state`. Returns { valid, error?, state? } where `state` is
+ * the state after the block.
+ */
+export function validateBlockAgainst(block, prev, state, { now = Date.now() } = {}) {
+  const fail = (error) => ({ valid: false, error });
+
+  if (!block.isValid(prev)) return fail('Block integrity check failed');
+
+  if (block.timestamp <= prev.timestamp) {
+    return fail('Block timestamp must be strictly greater than previous block');
+  }
+  if (block.timestamp > now + 60_000) return fail('Block timestamp too far in the future');
+
+  // ── Producer: signed by the miner, and a validator once validators exist ──
+  if (!block.hasValidSignature()) return fail('Block is not signed by its miner');
+  const validators = state.getValidators();
+  if (validators.length > 0 && !state.isValidator(block.miner)) {
+    return fail('Only staked validators can produce blocks');
+  }
+
+  if (!Array.isArray(block.transactions) || block.transactions.length === 0) {
+    return fail('Block has no transactions');
+  }
+  if (block.transactions.length > MAX_TXS_PER_BLOCK) return fail('Too many transactions in block');
+
+  // SEC-02: canonical JSON for deterministic model state comparison
+  const expectedStates = aggregateAIWeights(block.transactions, prev.modelStates || {});
+  if (canonicalStringify(block.modelStates || {}) !== canonicalStringify(expectedStates)) {
+    return fail('Invalid AI modelStates aggregation');
+  }
+
+  const txs = block.transactions.map(tx => (tx instanceof Transaction ? tx : Transaction.fromJSON(tx)));
+
+  const sorted = sortTransactions(txs);
+  for (let i = 0; i < txs.length; i++) {
+    if (txs[i] !== sorted[i]) return fail('Transactions are not in deterministic sorted order');
+  }
+
+  // ── Apply one by one on a copy: catches double-spends inside the block ──
+  const next = state.clone();
+  const ctx = { blockIndex: block.index, timestamp: block.timestamp, miner: block.miner };
+  const seen = new Set();
+  for (const tx of txs) {
+    if (seen.has(tx.txHash)) return fail(`Duplicate transaction ${tx.txHash}`);
+    seen.add(tx.txHash);
+    const v = tx.validate(next, ctx);
+    if (!v.valid) return fail(`Invalid transaction ${tx.txHash || ''}: ${v.error}`);
+    next.applyTransaction(tx, ctx);
+  }
+
+  if (next.totalSupply > 21_000_000_000) return fail('Block would exceed the 21 billion MZY supply cap');
+
+  return { valid: true, state: next };
+}
+
 export class Blockchain {
   constructor() {
     this.chain = [];
@@ -55,36 +119,28 @@ export class Blockchain {
     this.mempool = new Mempool({ maxSize: 500, maxAgeSec: 3600 });
     this.consensusEngine = null;
     this.pendingBlocks = [];
-    this.publicKeyMap = new Map();
-    this.validatorSet = null;
+    this.validatorSet = new ValidatorSet();
     this.globalModelStates = {};
-    this.models = new ModelRegistry();
     this.txIndex = new Map(); // address → [{ tx, blockIndex, blockHash }]
   }
 
   get length() { return this.chain.length; }
   get latestBlock() { return this.chain[this.chain.length - 1]; }
+  /** DeCompute registry lives in consensus state. */
+  get models() { return this.utxo.models; }
 
   initialize(validatorSet) {
     if (this.chain.length === 0) {
       const genesis = createGenesisBlock();
       this.chain.push(genesis);
-      this.utxo.applyBlock(genesis);
+      this.utxo = genesisState(genesis);
     }
 
-    if (this.models.getAvailable().length === 0) {
-      this.models.models.set('mziya-sentiment-v1', getDefaultModel());
-      this.models.submissions.set('mziya-sentiment-v1', []);
-    }
-
-    if (validatorSet) {
-      this.validatorSet = validatorSet;
-    } else {
-      this.validatorSet = new ValidatorSet();
-    }
+    if (validatorSet) this.validatorSet = validatorSet;
+    this._syncValidators();
 
     this.consensusEngine = new ConsensusEngine(this.validatorSet);
-    this.consensusEngine.onFinalize = ({ blockHash, votes }) => {
+    this.consensusEngine.onFinalize = ({ blockHash }) => {
       const block = this.pendingBlocks.find(b => b.hash === blockHash);
       if (block) {
         const res = this.addBlock(block);
@@ -98,10 +154,35 @@ export class Blockchain {
     return this;
   }
 
+  _syncValidators() {
+    if (this.validatorSet) this.validatorSet.syncFromState(this.utxo.getValidators());
+  }
+
+  // ── Mempool ──
+
+  /**
+   * State as it will be after the current mempool is mined. Lets a sender
+   * queue several txs (nonce n+1, n+2, …) before a block is produced.
+   */
+  getPendingState(timestamp = Date.now()) {
+    const state = this.utxo.clone();
+    const ctx = { blockIndex: this.chain.length, timestamp, miner: null };
+    for (const tx of sortTransactions(this.mempool.getAll())) {
+      if (tx.validate(state, ctx).valid) state.applyTransaction(tx, ctx);
+    }
+    return state;
+  }
+
+  /** Nonce to use for the next transaction from `address`. */
+  getNextNonce(address) {
+    return this.getPendingState().getNonce(address) + 1;
+  }
+
   addPendingTransaction(tx) {
     const txObj = tx instanceof Transaction ? tx : Transaction.fromJSON(tx);
+    const ctx = { blockIndex: this.chain.length, timestamp: Date.now(), miner: null };
 
-    const valid = txObj.validate(this.utxo, this.publicKeyMap);
+    const valid = txObj.validate(this.getPendingState(ctx.timestamp), ctx);
     if (!valid.valid) {
       return { success: false, error: valid.error };
     }
@@ -118,34 +199,47 @@ export class Blockchain {
     return this.mempool.getAll();
   }
 
-  forgeBlock(minerAddress) {
+  // ── Block production ──
+
+  /**
+   * Build and sign the next block from the mempool. Only includes txs that
+   * are valid in sequence. Returns null when there is nothing to include or
+   * this address may not produce blocks.
+   */
+  forgeBlock(minerAddress, privateKey) {
     const pending = this.mempool.getAll();
     if (pending.length === 0) return null;
 
-    // Check that this miner is allowed to propose at this block index
     if (this.consensusEngine && !this.consensusEngine.canPropose(minerAddress, this.chain.length)) {
-      const proposer = selectBlockProposer(this.validatorSet, this.chain.length);
-      const expected = proposer?.address?.slice(0, 14) || 'none';
-      return null; // not our turn to propose
+      return null; // validators exist and we are not one of them
     }
 
-    // Sort transactions deterministically
-    const sortedPending = sortTransactions(pending);
+    const prev = this.latestBlock;
+    const timestamp = Math.max(Date.now(), prev.timestamp + 1);
+    const ctx = { blockIndex: this.chain.length, timestamp, miner: minerAddress };
 
-    const prevStates = this.latestBlock ? this.latestBlock.modelStates : {};
-    const nextStates = aggregateAIWeights(sortedPending, prevStates);
-    this.globalModelStates = nextStates;
+    const state = this.utxo.clone();
+    const included = [];
+    for (const tx of sortTransactions(pending)) {
+      if (included.length >= MAX_TXS_PER_BLOCK) break;
+      if (tx.validate(state, ctx).valid) {
+        state.applyTransaction(tx, ctx);
+        included.push(tx);
+      }
+    }
+    if (included.length === 0) return null;
+
+    const nextStates = aggregateAIWeights(included, prev.modelStates || {});
 
     const block = new Block({
       index: this.chain.length,
-      previousHash: this.latestBlock.hash,
-      transactions: sortedPending.map(tx =>
-        tx.toJSON ? tx.toJSON() : tx
-      ),
+      previousHash: prev.hash,
+      transactions: included.map(tx => tx.toJSON()),
+      timestamp,
       miner: minerAddress,
       modelStates: nextStates,
     });
-
+    if (privateKey) block.sign(privateKey);
     return block;
   }
 
@@ -155,213 +249,78 @@ export class Blockchain {
       return { success: false, error: validation.error };
     }
 
-    for (const txData of block.transactions) {
-      const tx = txData instanceof Transaction ? txData : Transaction.fromJSON(txData);
-      if (tx.type === TX_TYPE.STAKE && this.validatorSet) {
-        const pubKey = tx.publicKey || this.utxo.publicKeys.get(tx.from);
-        if (pubKey) {
-          this.validatorSet.register(tx.from, pubKey, tx.amount);
-        }
-      }
-      if (tx.type === TX_TYPE.UNSTAKE && this.validatorSet) {
-        this.validatorSet.unregister(tx.from);
-      }
-      if (tx.type === TX_TYPE.MODEL_DEPLOY) {
-        this.models.deployModel(tx);
-      }
-      if (tx.type === TX_TYPE.TRAINING_SUBMIT) {
-        this.models.recordSubmission(tx);
-      }
-      if (tx.type === TX_TYPE.TRAINING_VERIFY) {
-        this.models.verifySubmission(tx);
-      }
-    }
-
     this.chain.push(block);
-    this.utxo.applyBlock(block);
-
+    this.utxo = validation.state;
+    this._syncValidators();
     this.globalModelStates = block.modelStates || {};
-
-    // PERF-01: Update transaction index
-    for (const txData of block.transactions) {
-      const tx = txData instanceof Transaction ? txData : txData;
-      if (tx.from) {
-        if (!this.txIndex.has(tx.from)) this.txIndex.set(tx.from, []);
-        this.txIndex.get(tx.from).push({ ...tx, blockIndex: block.index, blockHash: block.hash });
-      }
-      if (tx.to && tx.to !== tx.from) {
-        if (!this.txIndex.has(tx.to)) this.txIndex.set(tx.to, []);
-        this.txIndex.get(tx.to).push({ ...tx, blockIndex: block.index, blockHash: block.hash });
-      }
-    }
-
-    const blockTxHashes = new Set(
-      block.transactions.map(tx => tx.txHash || hashData(JSON.stringify(tx)))
-    );
-    this.mempool.removeMany([...blockTxHashes]);
+    this._indexBlock(block);
+    this._pruneMempool(block);
 
     return { success: true, blockHash: block.hash };
   }
 
   validateBlock(block) {
-    if (this.chain.length === 0) return { valid: true };
+    if (this.chain.length === 0) return { valid: false, error: 'Chain not initialized' };
+    return validateBlockAgainst(block, this.latestBlock, this.utxo);
+  }
 
-    const previous = this.latestBlock;
-
-    if (!block.isValid(previous)) {
-      return { valid: false, error: 'Block integrity check failed' };
-    }
-
-    // SEC-02: Use canonical JSON for deterministic model state comparison
-    const prevStates = previous.modelStates || {};
-    const expectedStates = aggregateAIWeights(block.transactions, prevStates);
-    if (canonicalStringify(block.modelStates || {}) !== canonicalStringify(expectedStates)) {
-      return { valid: false, error: 'Invalid AI modelStates aggregation' };
-    }
-
-    if (block.timestamp <= previous.timestamp) {
-      return { valid: false, error: 'Block timestamp must be strictly greater than previous block' };
-    }
-    if (block.timestamp > Date.now() + 60_000) {
-      return { valid: false, error: 'Block timestamp too far in the future' };
-    }
-
-    // PERF-05: Deserialize transactions once and reuse
-    const deserializedTxs = block.transactions.map(tx =>
-      tx instanceof Transaction ? tx : Transaction.fromJSON(tx)
-    );
-
-    // Enforce deterministic transaction ordering
-    const sortedTxs = sortTransactions([...deserializedTxs]);
-    for (let i = 0; i < deserializedTxs.length; i++) {
-      if (deserializedTxs[i].txHash !== sortedTxs[i].txHash) {
-        return { valid: false, error: 'Transactions are not in deterministic sorted order' };
+  _indexBlock(block) {
+    for (const tx of block.transactions) {
+      const entry = { ...(tx.toJSON ? tx.toJSON() : tx), blockIndex: block.index, blockHash: block.hash };
+      if (tx.from) {
+        if (!this.txIndex.has(tx.from)) this.txIndex.set(tx.from, []);
+        this.txIndex.get(tx.from).push(entry);
+      }
+      if (tx.to && tx.to !== tx.from) {
+        if (!this.txIndex.has(tx.to)) this.txIndex.set(tx.to, []);
+        this.txIndex.get(tx.to).push(entry);
       }
     }
+  }
 
-    const elapsedMs = block.timestamp - previous.timestamp;
-     // Max theoretical rate: 1.618 base * 1.25 val * 1.50 ref * 1.10 PoI ≈ 3.33 MZY/hr
-     const maxTheoreticalReward = (elapsedMs / 3_600_000) * TOKENOMICS.MAX_THEORETICAL_REWARD_RATE;
-    let totalMiningReward = 0;
-
-    for (const tx of deserializedTxs) {
-      const valid = tx.validate(this.utxo, this.publicKeyMap);
-      if (!valid.valid) {
-        return { valid: false, error: `Invalid transaction ${tx.txHash || ''}: ${valid.error}` };
-      }
-      if (tx.type === 'MINING') {
-        totalMiningReward += tx.amount;
-      }
+  /** Drop mined txs and any that can no longer be valid (stale nonces). */
+  _pruneMempool(block) {
+    this.mempool.removeMany(block.transactions.map(tx => tx.txHash));
+    for (const tx of this.mempool.getAll()) {
+      if (tx.nonce <= this.utxo.getNonce(tx.from)) this.mempool.remove(tx.txHash);
     }
+  }
 
-    // Allow a small absolute tolerance for very fast blocks or floating point
-    if (totalMiningReward > maxTheoreticalReward + 0.001) {
-      return { valid: false, error: `Total mining reward (${totalMiningReward}) exceeds theoretical maximum (${maxTheoreticalReward}) for elapsed time` };
+  // ── Whole-chain validation & sync ──
+
+  /**
+   * Replay a chain from genesis, validating every block.
+   * Returns { valid, state?, error?, height? }.
+   */
+  replayChain(chain) {
+    if (!chain || chain.length === 0) return { valid: false, error: 'Empty chain' };
+    const blocks = chain.map(b => (b instanceof Block ? b : Block.fromJSON(b)));
+
+    const genesis = createGenesisBlock();
+    if (blocks[0].hash !== genesis.hash) return { valid: false, error: 'Genesis block mismatch' };
+
+    let state = genesisState(genesis);
+    for (let i = 1; i < blocks.length; i++) {
+      const res = validateBlockAgainst(blocks[i], blocks[i - 1], state);
+      if (!res.valid) return { valid: false, error: `Block ${i}: ${res.error}`, height: i };
+      state = res.state;
     }
-
-    // ── Supply cap enforcement (21 billion MZY hard cap) ──
-    if (totalMiningReward > 0) {
-      const currentSupply = Array.from(this.utxo.balances.values())
-        .reduce((sum, bal) => sum + Math.max(0, bal), 0);
-      if (currentSupply + totalMiningReward > 21_000_000_000) {
-        const remaining = Math.max(0, 21_000_000_000 - currentSupply);
-        return { valid: false, error: `Mining reward (${totalMiningReward}) would exceed supply cap. Only ${remaining.toFixed(6)} MZY remaining.` };
-      }
-    }
-
-    return { valid: true };
+    return { valid: true, state, blocks };
   }
 
   validateChain(chain = this.chain) {
-    if (chain.length === 0) return false;
-
-    const genesis = createGenesisBlock();
-    if (chain[0].hash !== genesis.hash) return false;
-
-    const tempUtxo = new AccountState();
-    tempUtxo.applyBlock(chain[0]);
-
-    for (let i = 1; i < chain.length; i++) {
-      const block = chain[i] instanceof Block ? chain[i] : Block.fromJSON(chain[i]);
-      const prev = chain[i - 1] instanceof Block ? chain[i - 1] : Block.fromJSON(chain[i - 1]);
-      if (!block.isValid(prev)) return false;
-      if (block.timestamp <= prev.timestamp) return false;
-      if (block.timestamp > Date.now() + 60_000) return false;
-
-      // Verify transaction ordering
-      const sortedTxs = sortTransactions(block.transactions.map(tx => tx instanceof Transaction ? tx : Transaction.fromJSON(tx)));
-      for (let j = 0; j < block.transactions.length; j++) {
-        const tx = block.transactions[j] instanceof Transaction ? block.transactions[j] : Transaction.fromJSON(block.transactions[j]);
-        if (tx.txHash !== sortedTxs[j].txHash) return false;
-      }
-
-      const elapsedMs = block.timestamp - prev.timestamp;
-       const maxTheoreticalReward = (elapsedMs / 3_600_000) * TOKENOMICS.MAX_THEORETICAL_REWARD_RATE;
-      let totalMiningReward = 0;
-
-      for (const txData of block.transactions) {
-        const tx = txData instanceof Transaction ? txData : Transaction.fromJSON(txData);
-        const valid = tx.validate(tempUtxo, tempUtxo.publicKeys);
-        if (!valid.valid) return false;
-        
-        if (tx.type === 'MINING') {
-          totalMiningReward += tx.amount;
-        }
-
-        tempUtxo.applyTransaction(tx, block.miner);
-      }
-
-      if (totalMiningReward > maxTheoreticalReward + 0.001) return false;
-    }
-
-    return true;
+    return this.replayChain(chain).valid;
   }
 
-  /**
-   * CORR-01/02: Rebuild all state (UTXO, validators, models, txIndex) from a chain.
-   */
-  _rebuildState(chain) {
-    this.utxo = new AccountState();
-    this.validatorSet = this.validatorSet ? new ValidatorSet() : null;
-    this.models = new ModelRegistry();
+  _adoptChain(blocks, state) {
+    this.chain = blocks;
+    this.utxo = state;
+    this._syncValidators();
+    this.globalModelStates = blocks[blocks.length - 1].modelStates || {};
     this.txIndex = new Map();
-
-    for (const block of chain) {
-      this.utxo.applyBlock(block);
-
-      for (const txData of block.transactions) {
-        const tx = txData instanceof Transaction ? txData : Transaction.fromJSON(txData);
-        if (tx.type === TX_TYPE.STAKE && this.validatorSet) {
-          const pubKey = tx.publicKey || this.utxo.publicKeys.get(tx.from);
-          if (pubKey) this.validatorSet.register(tx.from, pubKey, tx.amount);
-        }
-        if (tx.type === TX_TYPE.UNSTAKE && this.validatorSet) {
-          this.validatorSet.unregister(tx.from);
-        }
-        if (tx.type === TX_TYPE.MODEL_DEPLOY) this.models.deployModel(tx);
-        if (tx.type === TX_TYPE.TRAINING_SUBMIT) this.models.recordSubmission(tx);
-        if (tx.type === TX_TYPE.TRAINING_VERIFY) this.models.verifySubmission(tx);
-
-        // Rebuild txIndex
-        if (tx.from) {
-          if (!this.txIndex.has(tx.from)) this.txIndex.set(tx.from, []);
-          this.txIndex.get(tx.from).push({ ...tx, blockIndex: block.index, blockHash: block.hash });
-        }
-        if (tx.to && tx.to !== tx.from) {
-          if (!this.txIndex.has(tx.to)) this.txIndex.set(tx.to, []);
-          this.txIndex.get(tx.to).push({ ...tx, blockIndex: block.index, blockHash: block.hash });
-        }
-      }
-    }
-
-    this.globalModelStates = chain.length > 0
-      ? (chain[chain.length - 1].modelStates || {})
-      : {};
-
-    // Re-register default model if empty
-    if (this.models.getAvailable().length === 0) {
-      this.models.models.set('mziya-sentiment-v1', getDefaultModel());
-      this.models.submissions.set('mziya-sentiment-v1', []);
+    for (const b of blocks) this._indexBlock(b);
+    for (const tx of this.mempool.getAll()) {
+      if (tx.nonce <= this.utxo.getNonce(tx.from)) this.mempool.remove(tx.txHash);
     }
   }
 
@@ -370,45 +329,37 @@ export class Blockchain {
 
     // Verify our chain is a strict prefix of the incoming chain
     for (let i = 0; i < this.chain.length; i++) {
-      const cur = this.chain[i];
       const inc = incomingBlocks[i];
-      if (cur.hash !== (inc.hash || inc.computeHash?.())) {
-        return false;
-      }
+      if (this.chain[i].hash !== (inc.hash || inc.computeHash?.())) return false;
     }
 
-    if (!this.validateChain(incomingBlocks)) return false;
-
-    this.chain = incomingBlocks;
-    // CORR-01: Rebuild ALL state, not just UTXO
-    this._rebuildState(this.chain);
-
+    const res = this.replayChain(incomingBlocks);
+    if (!res.valid) return false;
+    this._adoptChain(res.blocks, res.state);
     return true;
   }
 
   replaceChain(incomingChain) {
-    const incomingBlocks = incomingChain.map(b => b instanceof Block ? b : Block.fromJSON(b));
+    const incomingBlocks = incomingChain.map(b => (b instanceof Block ? b : Block.fromJSON(b)));
 
     const ourWork = this.chain.reduce((sum, b) => sum + (b.transactions?.length || 0), 0);
     const incomingWork = incomingBlocks.reduce((sum, b) => sum + (b.transactions?.length || 0), 0);
 
     const isLonger = incomingBlocks.length > this.chain.length;
     const isSameLengthWithMoreWork = incomingBlocks.length === this.chain.length && incomingWork > ourWork;
-    const isSameLengthAndWorkWithBetterHash = incomingBlocks.length === this.chain.length && incomingWork === ourWork && 
+    const isSameLengthAndWorkWithBetterHash = incomingBlocks.length === this.chain.length && incomingWork === ourWork &&
       incomingBlocks[incomingBlocks.length - 1].hash < this.latestBlock.hash;
 
     if (!isLonger && !isSameLengthWithMoreWork && !isSameLengthAndWorkWithBetterHash) {
       return { replaced: false, reason: 'Incoming chain does not have more work' };
     }
 
-    if (!this.validateChain(incomingBlocks)) {
-      return { replaced: false, reason: 'Incoming chain is invalid' };
+    const res = this.replayChain(incomingBlocks);
+    if (!res.valid) {
+      return { replaced: false, reason: `Incoming chain is invalid: ${res.error}` };
     }
 
-    this.chain = incomingBlocks;
-    // CORR-02: Rebuild ALL state, not just UTXO
-    this._rebuildState(this.chain);
-
+    this._adoptChain(res.blocks, res.state);
     return { replaced: true };
   }
 
@@ -417,25 +368,18 @@ export class Blockchain {
     return this.consensusEngine.castVote(voteData);
   }
 
+  // ── Queries ──
+
   getBalance(address) {
     return this.utxo.getBalance(address);
   }
 
+  getStake(address) {
+    return this.utxo.getStake(address);
+  }
+
   getTransactionHistory(address) {
-    // PERF-01: Use txIndex for O(1) lookups when available
-    if (this.txIndex.has(address)) {
-      return [...this.txIndex.get(address)].reverse();
-    }
-    // Fallback: scan chain (only if index not built)
-    const history = [];
-    for (const block of this.chain) {
-      for (const tx of block.transactions) {
-        if (tx.from === address || tx.to === address) {
-          history.push({ ...tx, blockIndex: block.index, blockHash: block.hash });
-        }
-      }
-    }
-    return history.reverse();
+    return [...(this.txIndex.get(address) || [])].reverse();
   }
 
   getBlockByHash(hash) {
@@ -462,25 +406,31 @@ export class Blockchain {
       latestBlockTime: this.latestBlock?.timestamp,
       totalTransactions: allTxs,
       pendingTransactions: this.mempool.size,
-      // CORR-07: Clamp negative balances for accurate supply
-      circulatingSupply: Array.from(this.utxo.balances.values())
-        .reduce((sum, bal) => sum + Math.max(0, bal), 0),
-      validatorCount: this.validatorSet?.count() || 0,
+      totalSupply: this.utxo.totalSupply,
+      circulatingSupply: this.utxo.totalSupply,
+      totalBurned: this.utxo.totalBurned,
+      totalStaked: this.utxo.totalStaked(),
+      totalStakingRewards: this.utxo.totalStakingRewards,
+      escrowLocked: this.utxo.models.totalEscrow(),
+      remainingSupply: this.utxo.remainingSupply(),
+      validatorCount: this.utxo.getValidators().length,
       modelCount: Object.keys(this.globalModelStates).length,
     };
   }
 
   toJSON() {
-    return this.chain.map(b => b.toJSON ? b.toJSON() : b);
+    return this.chain.map(b => (b.toJSON ? b.toJSON() : b));
   }
 
+  /**
+   * Load a stored chain. Every block is re-validated; throws if the stored
+   * chain is invalid (e.g. created by an older, incompatible version).
+   */
   static fromJSON(chainData) {
     const bc = new Blockchain();
-    bc.chain = chainData.map(b => Block.fromJSON(b));
-    // Rebuild all state from the deserialized chain
-    bc._rebuildState(bc.chain);
+    const res = bc.replayChain(chainData);
+    if (!res.valid) throw new Error(`Stored chain is invalid: ${res.error}`);
+    bc._adoptChain(res.blocks, res.state);
     return bc;
   }
 }
-
-

@@ -2,9 +2,8 @@
  * Mziya Blockchain — Consensus Engine
  * BFT-style round management with validator-set block proposal.
  *
- * - Validators (staked MZY) take turns proposing blocks in rounds
+ * - Validators (>= MIN_STAKE MZY staked) produce blocks
  * - 2/3 supermajority of validators required for finality
- * - Round-robin proposer selection weighted by stake
  * - If no validators (testnet/early phase), any miner can propose
  * - A validator cartel controlling >2/3 of stake can control the chain
  */
@@ -32,6 +31,18 @@ export class ValidatorSet {
   unregister(address) {
     if (this.validators.has(address)) {
       this.validators.get(address).active = false;
+    }
+  }
+
+  /**
+   * Replace the set with the validators derived from chain state
+   * (every address with stake >= MIN_STAKE). Keeps this object's identity so
+   * the ConsensusEngine that holds it sees the update.
+   */
+  syncFromState(validators) {
+    this.validators.clear();
+    for (const v of validators) {
+      if (v.publicKey) this.register(v.address, v.publicKey, v.stake);
     }
   }
 
@@ -164,15 +175,14 @@ export class ConsensusEngine {
   }
 
   /**
-   * Check whether a given miner address is allowed to propose a block
-   * at the given block index.
-   * If no validators are registered (testnet), any miner can propose.
-   * If validators are registered, only the designated proposer can.
+   * Check whether a given miner address may produce a block.
+   * If no validators are staked (early network), anyone can.
+   * Once validators exist, only staked validators can — any of them, so one
+   * offline validator can never stall the chain.
    */
   canPropose(minerAddress, blockIndex) {
-    const proposer = selectBlockProposer(this.validatorSet, blockIndex);
-    if (!proposer) return true; // open mining — anyone can propose
-    return proposer.address === minerAddress;
+    if (this.validatorSet.count() === 0) return true; // open mining — anyone can propose
+    return this.validatorSet.isValidator(minerAddress);
   }
 
   /**

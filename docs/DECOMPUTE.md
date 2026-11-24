@@ -1,5 +1,7 @@
 # Mziya Decentralized Compute (DeCompute)
 
+> **Note:** the current consensus rules for mining claims, fees, staking and DeCompute payouts are in [ECONOMY.md](ECONOMY.md). Where this page disagrees, ECONOMY.md is correct.
+
 > ML training market on top of the Mziya blockchain.
 > Users earn MZY by donating CPU/GPU cycles. Companies pay MZY for distributed training.
 

@@ -14,6 +14,9 @@ Mziya is a mobile-first and desktop blockchain with **zero central infrastructur
 - **MZY Coin** — 21 billion max supply, halving every 2 years
 - **Mine for free** — tap once per day to earn MZY via Proof-of-Activity
 - **PoI bonus** — train a tiny AI model on-device for up to +10% mining bonus (optional)
+- **Earn by training AI** — companies lock MZY in escrow; trainers are paid once a verifier confirms their accuracy
+- **Staking** — lock 100+ MZY to become a validator: produce blocks, share 10% extra on every mining claim, +25% mining
+- **Fee burn** — half of every fee is destroyed, so supply shrinks with usage
 - **Ed25519 cryptography** — BIP39 12-word mnemonics, all keys encrypted at rest (PBKDF2 1M + AES-256-GCM)
 - **Fully P2P** — libp2p with mDNS + WebRTC + Kademlia DHT + GossipSub + Peer Exchange
 - **Self-verifying transactions** — every tx carries its own Ed25519 public key, nonce replay protection
@@ -149,9 +152,11 @@ On subsequent runs, the CLI detects the existing `wallet.json` and offers to reu
 | Key theft from localStorage | Private key + mnemonic encrypted with PBKDF2 (1M) + AES-256-GCM |
 | DoS via message flood | Per-peer rate limiting (20 msg/s), 1 MB msg cap, 100-block pending cap with 5min TTL |
 | Unauthenticated votes | Optional `signer` callback — votes signed with Ed25519 |
-| Double-spend | Account model with nonce + balance check before every tx |
-| Mining reward forgery | Strict mathematical limits (`elapsedMs * maxRate`) + restricted to `GENESIS` sender |
-| Fake AI Submissions | Simulated zkML: Deterministic dataset seeded by `previousBlockHash` + `ai-verifier.js` validation |
+| Double-spend | Block txs applied one by one to a state copy; nonce + balance checked for each |
+| Mining reward forgery | Claims are signed by the miner and must equal the reward computed from the on-chain `MINING_START` session |
+| Block forgery | Blocks signed by their producer; only staked validators may produce once any exist |
+| Unlimited supply | `totalSupply` tracked explicitly; 21B hard cap enforced per block |
+| Fake AI Submissions | Paid DeCompute submissions are re-evaluated by the provider or a validator before payout |
 
 All **CRITICAL** and **HIGH** severity vulnerabilities identified in the 2026-06-02 security audit have been fixed.
 
@@ -213,9 +218,12 @@ Discovery uses **mDNS** (local WiFi), **Kademlia DHT** (global routing), and **P
 | Initial Mining Rate | 1.618 MZY/hour (golden ratio) |
 | Halving Period | Every 2 years |
 | Floor Rate | 0.202 MZY/hour |
-| Validator Bonus | +25% |
-| Referral Bonus | +5% per active referral (max 50%) |
+| Validator Bonus | +25% (stake ≥ 100 MZY) |
+| Validator Reward | +10% of every mining claim, shared by stake |
+| Fee | Min 0.000001 MZY; 50% burned, 50% to block producer |
 | PoI Bonus | Up to +10% additive (accuracy-weighted) |
+
+Full rules: [docs/ECONOMY.md](docs/ECONOMY.md).
 
 ### Halving Schedule
 
@@ -237,7 +245,7 @@ poiBonus = earned × bestAccuracy × 0.10
 total     = earned + poiBonus
 ```
 
-The model (`mziya-sentiment-v1`) is a TF.js sequential model trained in a background WebWorker. The worker generates a dataset deterministically seeded by the current `blockHash` to prevent data falsification. Weights are submitted as `AI_SUBMISSION` transactions and independently evaluated by the `ai-verifier.js` engine on every node before being accepted. Valid submissions are aggregated on-chain via Federated Averaging (FedAvg), increasing your mining bonus on the next claim.
+The practice model (`mziya-sentiment-v1`) is a TF.js sequential model trained in a background WebWorker on a dataset seeded by the current block hash. Training it during an open mining session records your accuracy on-chain and raises that session's reward. PoI accuracy is self-reported, which is why the bonus is capped at +10%. Paid DeCompute models are verified before they pay out (see [docs/ECONOMY.md](docs/ECONOMY.md)).
 
 ---
 
@@ -261,6 +269,7 @@ See the `docs/` directory for detailed technical references:
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Core Blockchain](docs/CORE.md)
+- [Economy: supply, fees, staking, AI payouts](docs/ECONOMY.md)
 - [Mining & Tokenomics](docs/MINING.md)
 - [Cryptography & Wallets](docs/CRYPTO.md)
 - [Transactions](docs/TRANSACTIONS.md)

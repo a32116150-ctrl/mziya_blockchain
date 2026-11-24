@@ -6,52 +6,17 @@
  *  - Mining rate decreases over time (halving schedule)
  */
 
-// ── Tokenomics Constants ───────────────────────────────────────────────────
+// Tokenomics and reward math live in core/tokenomics.js (re-exported here
+// for backwards compatibility).
+export {
+  TOKENOMICS,
+  getCurrentMiningRate,
+  calculateSessionEarnings,
+  computeSessionReward,
+} from './tokenomics.js';
 
-export const TOKENOMICS = {
-  TOTAL_SUPPLY:        21_000_000_000,   // 21 billion MZY hard cap
-  INITIAL_HOURLY_RATE: 1.618,            // Golden ratio base rate
-  HALVING_PERIOD_MS:   2 * 365.25 * 24 * 60 * 60 * 1000, // 2 years
-  FLOOR_RATE:          0.202,            // Minimum rate after all halvings
-  SESSION_DURATION_MS: 24 * 60 * 60 * 1000,  // 24 hours per session
-  VALIDATOR_BONUS:     0.25,             // +25% for running a node
-  REFERRAL_BONUS:      0.05,             // +5% per active referred miner
-  BLOCK_TIME_MS:       60_000,           // 60 seconds per block
-  GENESIS_TIMESTAMP:   1748736000000,    // 2026-06-01 00:00:00 UTC
-  POI_BONUS_MULTIPLIER: 0.10,            // +10% PoI bonus multiplier
-  MAX_MINING_REWARD:    100,             // Max mining reward per claim
-  MAX_THEORETICAL_REWARD_RATE: 3.5,      // Max theoretical hourly reward rate
-};
-
-import { Transaction, createMiningReward } from './transaction.js';
-
-// ── Rate Calculator ────────────────────────────────────────────────────────
-
-/**
- * Calculate current mining rate based on elapsed time since genesis.
- * Rate halves every 2 years, with a floor.
- */
-export function getCurrentMiningRate(timestamp = Date.now(), activeReferrals = 0, isValidator = false) {
-  const elapsed = timestamp - TOKENOMICS.GENESIS_TIMESTAMP;
-  const halvings = Math.floor(elapsed / TOKENOMICS.HALVING_PERIOD_MS);
-
-  let rate = TOKENOMICS.INITIAL_HOURLY_RATE / Math.pow(2, halvings);
-  rate = Math.max(rate, TOKENOMICS.FLOOR_RATE);
-
-  // Bonuses
-  if (isValidator) rate *= (1 + TOKENOMICS.VALIDATOR_BONUS);
-  if (activeReferrals > 0) rate *= (1 + Math.min(activeReferrals, 10) * TOKENOMICS.REFERRAL_BONUS);
-
-  return Math.round(rate * 1_000_000) / 1_000_000; // 6 decimal places
-}
-
-/**
- * Calculate MZY earned during a mining session.
- */
-export function calculateSessionEarnings(durationMs, rate) {
-  const hours = durationMs / (60 * 60 * 1000);
-  return Math.round(hours * rate * 1_000_000) / 1_000_000;
-}
+import { TOKENOMICS, getCurrentMiningRate, calculateSessionEarnings } from './tokenomics.js';
+import { createMiningStart, createMiningClaim } from './transaction.js';
 
 // ── Mining Session ─────────────────────────────────────────────────────────
 
@@ -97,6 +62,17 @@ export class MiningSession {
       this.earned = Math.round(this.earned * 1_000_000) / 1_000_000;
       this.lastUpdate = now;
     }
+  }
+
+  /** Snap the countdown to the on-chain start time. */
+  alignTo(startTimestamp) {
+    this.startTime = startTimestamp;
+    this.endTime = startTimestamp + TOKENOMICS.SESSION_DURATION_MS;
+    this.sessionId = `${this.address}-${startTimestamp}`;
+    if (this.lastUpdate < startTimestamp) this.lastUpdate = startTimestamp;
+    const elapsed = Math.min(Date.now(), this.endTime) - startTimestamp;
+    this.earned = calculateSessionEarnings(Math.max(0, elapsed), this.rate);
+    this.lastUpdate = Math.min(Date.now(), this.endTime);
   }
 
   get remainingMs() {
@@ -149,6 +125,14 @@ export class MiningSession {
 
 // ── Session Manager ────────────────────────────────────────────────────────
 
+/**
+ * Drives mining for a wallet:
+ *   startSession → signs MINING_START (the chain records the start time)
+ *   claimReward  → after 24h, signs a MINING claim for the exact amount the
+ *                  chain computes (base rate × 24h, +25% for validators,
+ *                  + Proof-of-Intelligence bonus).
+ * The local MiningSession only drives the UI countdown.
+ */
 export class MiningManager {
   constructor(storage) {
     this.storage = storage; // IndexedDB or LevelDB wrapper
@@ -156,28 +140,58 @@ export class MiningManager {
     this.tickInterval = null;
   }
 
+  /**
+   * Try to put the mempool into a block right away (local / small networks).
+   * Returns { block, error } — block is null when this node may not produce.
+   */
+  _forgeNow(address, blockchain, privateKey, broadcastBlock) {
+    const block = blockchain.forgeBlock(address, privateKey);
+    if (!block) return { block: null };
+    const result = blockchain.addBlock(block);
+    if (!result.success) return { block: null, error: `Block rejected: ${result.error}` };
+    broadcastBlock?.(block);
+    return { block };
+  }
+
+  /**
+   * @param {string} address
+   * @param {{ privateKey:string, blockchain:Blockchain, referrals?:number,
+   *           broadcastTx?:Function, broadcastBlock?:Function }} options
+   */
   async startSession(address, options = {}) {
-    if (this.activeSessions.has(address)) {
-      const existing = this.activeSessions.get(address);
-      if (existing.active) return { error: 'Session already active', session: existing };
+    const { privateKey, blockchain, broadcastTx, broadcastBlock } = options;
+    if (!privateKey || !blockchain) {
+      return { error: 'startSession needs the wallet private key and the blockchain' };
     }
 
-    const rate = getCurrentMiningRate(Date.now(), options.referrals, options.isValidator);
-    const session = new MiningSession({
-      address,
-      rate,
-      referrals: options.referrals || 0,
-      isValidator: options.isValidator || false,
-    });
+    const existing = this.activeSessions.get(address);
+    if (existing?.active) return { error: 'Session already active', session: existing };
+
+    const pendingState = blockchain.getPendingState();
+    if (pendingState.getMiningSession(address)) {
+      return { error: 'A mining session is already open on-chain — claim it first' };
+    }
+
+    const tx = createMiningStart({ address, nonce: pendingState.getNonce(address) + 1, privateKey });
+    const added = blockchain.addPendingTransaction(tx);
+    if (!added.success) return { error: `Could not start session: ${added.error}` };
+    broadcastTx?.(tx);
+    const forged = this._forgeNow(address, blockchain, privateKey, broadcastBlock);
+
+    const isValidator = blockchain.utxo.isValidator(address);
+    const rate = getCurrentMiningRate(Date.now(), 0, isValidator);
+    const session = new MiningSession({ address, rate, referrals: options.referrals || 0, isValidator });
+    // Use the on-chain start time once the start tx is in a block
+    const onChain = blockchain.utxo.getMiningSession(address);
+    if (onChain) session.alignTo(onChain.start);
 
     this.activeSessions.set(address, session);
     await this.storage?.set(`session:${address}`, JSON.stringify(session.toJSON()));
 
-    return { session };
+    return { session, tx, block: forged.block, pending: !onChain };
   }
 
   async confirmActivity(address) {
-    // The daily "tap" — confirms the user is human and active
     const session = this.activeSessions.get(address);
     if (!session) return { error: 'No active session' };
     if (!session.active) return { error: 'Session expired — start a new one' };
@@ -191,24 +205,38 @@ export class MiningManager {
     return this.activeSessions.get(address) || null;
   }
 
-  async loadSession(address) {
+  /**
+   * Restore the local session. If a blockchain is given, the on-chain session
+   * wins (e.g. after reinstalling, or if the start tx was mined later).
+   */
+  async loadSession(address, blockchain = null) {
+    const onChain = blockchain?.utxo?.getMiningSession(address) || null;
     const data = await this.storage?.get(`session:${address}`);
-    if (!data) return null;
-    const session = MiningSession.fromJSON(JSON.parse(data));
-    // Resume if still within 24h
-    if (session.active && Date.now() < session.endTime) {
-      session.tick(); // catch up
-      this.activeSessions.set(address, session);
-      return session;
+    let session = data ? MiningSession.fromJSON(JSON.parse(data)) : null;
+
+    if (onChain) {
+      if (!session) {
+        const isValidator = blockchain.utxo.isValidator(address);
+        session = new MiningSession({ address, rate: getCurrentMiningRate(onChain.start, 0, isValidator), isValidator });
+      }
+      session.alignTo(onChain.start);
     }
-    return null;
+    if (!session) return null;
+
+    if (Date.now() < session.endTime) {
+      session.active = true;
+      session.tick(); // catch up
+    } else {
+      session.expire();
+    }
+    this.activeSessions.set(address, session);
+    return session;
   }
 
   startTicking(intervalMs = 60_000) {
     this.tickInterval = setInterval(() => {
       for (const session of this.activeSessions.values()) {
         if (session.active) session.tick();
-        else this.activeSessions.delete(session.address);
       }
     }, intervalMs);
   }
@@ -218,61 +246,56 @@ export class MiningManager {
   }
 
   /**
-   * Generate the mining reward transaction for a completed session.
-   * Checks total supply cap before minting.
-   * Broadcasts tx + block through optional callbacks for P2P propagation.
+   * Claim the reward for a finished on-chain session.
+   * The amount is whatever the chain says the session earned — the local
+   * counter is only a preview.
    */
-  async claimReward(address, blockchain, broadcastTx, broadcastBlock) {
-    const session = this.activeSessions.get(address);
-    if (!session || session.active) {
+  async claimReward(address, blockchain, broadcastTx, broadcastBlock, privateKey) {
+    const local = this.activeSessions.get(address);
+    if (local?.active) {
       return { error: 'Session must be completed before claiming' };
     }
+    if (!blockchain) return { error: 'No blockchain' };
+    if (!privateKey) return { error: 'Wallet private key required to sign the claim' };
 
-    // ── Supply cap check ──
-    const currentSupply = [...(blockchain?.utxo?.balances?.values() || [])].reduce((s, v) => s + Math.max(0, v), 0);
-    if (currentSupply + session.earned > TOKENOMICS.TOTAL_SUPPLY) {
-      const remaining = Math.max(0, TOKENOMICS.TOTAL_SUPPLY - currentSupply);
-      return { error: `Supply cap reached. Only ${remaining.toFixed(6)} MZY remaining to be mined.` };
+    const pendingState = blockchain.getPendingState();
+    const expected = pendingState.expectedMiningReward(address);
+    if (!expected) {
+      return { error: 'No mining session found on-chain. Start a session first.' };
+    }
+    if (!expected.ready) {
+      const mins = Math.ceil((expected.endsAt - Date.now()) / 60_000);
+      return { error: `Session ends in ${mins} min — claim after it finishes` };
+    }
+    if (expected.amount <= 0) {
+      return { error: 'Supply cap reached. No MZY left to mine.' };
     }
 
-    let bestAcc = 0;
+    const tx = createMiningClaim({
+      address,
+      amount: expected.amount,
+      nonce: pendingState.getNonce(address) + 1,
+      privateKey,
+      data: { poiAccuracy: expected.bestAccuracy },
+    });
 
-    if (blockchain && blockchain.chain) {
-      for (const block of blockchain.chain) {
-        if (block.timestamp >= session.startTime) {
-          for (const txData of block.transactions) {
-            if (txData.type === 'AI_SUBMISSION' && txData.from === address && txData.data && typeof txData.data.accuracy === 'number') {
-              if (txData.data.accuracy > bestAcc) bestAcc = txData.data.accuracy;
-            }
-          }
-        }
-      }
-    }
-
-    let poiBonus = 0;
-    if (bestAcc > 0) {
-      poiBonus = Math.round(session.earned * (bestAcc * TOKENOMICS.POI_BONUS_MULTIPLIER) * 1000000) / 1000000;
-      session.earned = Math.round((session.earned + poiBonus) * 1000000) / 1000000;
-    }
-
-    const tx = createMiningReward(address, session.earned, blockchain.length);
-    tx.data = { ...tx.data, poiAccuracy: bestAcc, poiBonus };
-
-    blockchain.mempool.add(tx);
+    const added = blockchain.addPendingTransaction(tx);
+    if (!added.success) return { error: `Claim rejected: ${added.error}` };
     broadcastTx?.(tx);
 
-    const block = blockchain.mempool.size > 0 ? blockchain.forgeBlock(address) : null;
-    if (block) {
-      broadcastBlock?.(block);
-      const result = blockchain.addBlock(block);
-      if (!result.success) {
-        return { error: `Block rejected: ${result.error}`, tx, amount: session.earned };
-      }
-    }
+    const forged = this._forgeNow(address, blockchain, privateKey, broadcastBlock);
+    if (forged.error) return { error: forged.error, tx, amount: expected.amount };
 
     this.activeSessions.delete(address);
     await this.storage?.delete(`session:${address}`);
 
-    return { tx, amount: session.earned, poiBonus, bestAccuracy: bestAcc };
+    return {
+      tx,
+      amount: expected.amount,
+      baseReward: expected.base,
+      poiBonus: expected.poiBonus,
+      bestAccuracy: tx.data.poiAccuracy,
+      included: !!forged.block,
+    };
   }
 }

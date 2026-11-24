@@ -5,7 +5,7 @@ import { initWalletPage } from './wallet.js';
 import { initMinePage } from './mining.js';
 import { initSendPage } from './send.js';
 import { initExplorerPage } from './explorer.js';
-import { initDecompute, handleDecomputeTrain } from './decompute.js';
+import { initDecompute, handleDecomputeTrain, refreshDecomputePanel } from './decompute.js';
 
 // Estimated market price (informational only — not a live oracle)
 // Update this based on real exchange data or set via env var
@@ -123,11 +123,17 @@ async function loadChainFromStorage() {
     if (stored) {
       const chainData = JSON.parse(stored);
       if (chainData && chainData.length > 1) {
-        App.blockchain = Blockchain.fromJSON(chainData);
+        App.blockchain.consensusEngine?.stop();
+        App.blockchain = Blockchain.fromJSON(chainData).initialize();
       }
     }
   } catch (err) {
     console.warn('[Mziya] Chain load failed:', err.message);
+    if (/Stored chain is invalid/.test(err.message)) {
+      // Saved by an older, incompatible protocol version — start fresh.
+      try { await getChainStorage().delete('chain'); } catch { /* ignore */ }
+      setTimeout(() => toast('Network upgraded — your local chain copy was reset.', 'info'), 1500);
+    }
   }
 }
 
@@ -224,6 +230,7 @@ function updateExplorerStats() {
 function refreshUI() {
   updatePeerCount();
   updateExplorerStats();
+  refreshDecomputePanel();
   if (App.wallet) {
     const balance = App.blockchain.getBalance(App.wallet.address);
     const balEl = document.getElementById('balance-display');
@@ -421,6 +428,25 @@ function bindLockEvents() {
   document.getElementById('btn-lock-logout')?.addEventListener('click', logoutWallet);
 }
 
+/**
+ * Ask for the wallet password and return the decrypted private key, or null.
+ * The key only lives in memory for the signing call that needs it.
+ */
+export async function requestPrivateKey(title = 'Sign Transaction', sub = 'Enter your wallet password to sign:') {
+  if (!App.wallet) { toast('Create or unlock a wallet first!', 'error'); return null; }
+  if (App.wallet.isWatchOnly) { toast('Watch-only accounts cannot sign transactions', 'error'); return null; }
+  if (!ensureUnlocked()) return null;
+  const pw = await promptModal({ title, sub, label: 'Password', placeholder: 'Wallet password', isPassword: true });
+  if (!pw) return null;
+  try {
+    const { decryptPrivateKey } = await import('../../core/wallet.js');
+    return await decryptPrivateKey(App.wallet.privateKeyEncrypted, pw);
+  } catch {
+    toast('Wrong password', 'error');
+    return null;
+  }
+}
+
 export function ensureUnlocked() {
   if (App.locked) {
     showLockScreen(true);
@@ -511,11 +537,21 @@ function renderTxHistory() {
   for (let i = 0; i < shown.length; i++) {
     const tx = shown[i];
     const mine = tx.type === 'MINING';
-    const isIn = tx.to === addr && !mine;
+    const special = {
+      MINING_START: ['Mining Started', 'Network'],
+      STAKE: ['Staked', 'Staking'],
+      UNSTAKE: ['Unstaked', 'Staking'],
+      MODEL_DEPLOY: ['Model Escrow', 'DeCompute'],
+      MODEL_WITHDRAW: ['Escrow Refund', 'DeCompute'],
+      TRAINING_SUBMIT: ['Training Submitted', 'DeCompute'],
+      TRAINING_VERIFY: ['Verified Training', 'DeCompute'],
+      AI_SUBMISSION: ['AI Submission', 'Network'],
+    }[tx.type];
+    const isIn = (tx.to === addr && tx.from !== addr && !mine) || tx.type === 'UNSTAKE';
     const cls = mine ? 'mine' : isIn ? 'in' : 'out';
-    const label = mine ? 'Mining Reward' : isIn ? 'Received' : 'Sent';
-    const sign = (mine || isIn) ? '+' : '-';
-    const other = mine ? 'Network' : isIn ? (tx.from || 'Network') : tx.to;
+    const label = mine ? 'Mining Reward' : special ? special[0] : isIn ? 'Received' : 'Sent';
+    const sign = (mine || isIn) ? '+' : (tx.amount ? '-' : '');
+    const other = mine ? 'Network' : special ? special[1] : isIn ? (tx.from || 'Network') : tx.to;
 
     const item = document.createElement('div');
     item.className = 'tx-item';
@@ -611,22 +647,9 @@ function renderSettings() {
 
 function updatePoIBonusDisplay() {
   if (!App.wallet) return;
-  const addr = App.wallet.address;
-  let bestAcc = 0;
-
-  const pending = App.blockchain.mempool?.getAll() || [];
-  for (const tx of pending) {
-    if (tx.type === 'AI_SUBMISSION' && tx.from === addr && tx.data?.accuracy) {
-      if (tx.data.accuracy > bestAcc) bestAcc = tx.data.accuracy;
-    }
-  }
-  if (App.blockchain?.latestBlock?.transactions) {
-    for (const tx of App.blockchain.latestBlock.transactions) {
-      if (tx.type === 'AI_SUBMISSION' && tx.from === addr && tx.data?.accuracy) {
-        if (tx.data.accuracy > bestAcc) bestAcc = tx.data.accuracy;
-      }
-    }
-  }
+  // PoI bonus comes from the best accuracy recorded on-chain during the open session
+  const session = App.blockchain.getPendingState?.().getMiningSession(App.wallet.address);
+  const bestAcc = session?.bestAccuracy || 0;
 
   const bonusPct = Math.round(bestAcc * 10 * 100) / 100;
   const el = document.getElementById('poi-bonus-pct');
@@ -923,13 +946,13 @@ function getCopilotResponse(userText) {
 
   // ── FEES ──
   if (/fee|gas|network fee|transaction fee|cost to send/.test(q)) {
-    return { text: "Mziya's network fee is a flat 0.000001 MZY (1 micro-MZY) per transfer. It's deflationary — fees are burned, permanently removed from the 21 billion supply. There are no gas auctions or priority fees." };
+    return { text: "The minimum network fee is 0.000001 MZY per transfer. Half of every fee is burned (permanently removed from supply) and the other half goes to the validator that produced the block — a minimum fee is burned entirely. Starting/claiming mining and submitting AI training are free." };
   }
 
   // ── TOKENOMICS / SUPPLY ──
   if (/supply|total supply|how many mzy|tokenomics|circulating|market cap|21 billion/.test(q)) {
     const stats = App.blockchain.getStats();
-    return { text: `MZY Tokenomics:\n\n• Total Supply: 21,000,000,000 MZY (21 billion)\n• Circulating: ${formatMZY(stats.circulatingSupply, 2)} MZY\n• Ticker: MZY\n• Model: Deflationary (fees burned)\n\nMining rate halves every 2 years, with a floor rate of 0.202 MZY/h. Think Bitcoin-style scarcity, but mined by your phone.` };
+    return { text: `MZY Tokenomics:\n\n• Max Supply: 21,000,000,000 MZY (21 billion)\n• In existence: ${formatMZY(stats.totalSupply, 2)} MZY\n• Burned by fees: ${formatMZY(stats.totalBurned, 6)} MZY\n• Staked by validators: ${formatMZY(stats.totalStaked, 2)} MZY\n• Locked in AI escrow: ${formatMZY(stats.escrowLocked, 2)} MZY\n\nUses: pay for AI model training (DeCompute), stake to validate and earn, pay fees (half burned).\nMining rate halves every 2 years, with a floor rate of 0.202 MZY/h.` };
   }
 
   // ── MINING RATE / EARNINGS ──

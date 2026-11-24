@@ -1,4 +1,4 @@
-import { Block, createGenesisBlock, buildMerkleTree, hashData } from '../core/block.js';
+import { Block, createGenesisBlock, buildMerkleTree, hashData, canonicalStringify } from '../core/block.js';
 
 describe('Block Core', () => {
   describe('buildMerkleTree', () => {
@@ -10,7 +10,7 @@ describe('Block Core', () => {
     it('returns correct hash for a single transaction', () => {
       const tx = { from: 'Alice', to: 'Bob', amount: 10 };
       const root = buildMerkleTree([tx]);
-      expect(root).toBe(hashData(JSON.stringify(tx)));
+      expect(root).toBe(hashData(canonicalStringify(tx)));
     });
 
     it('builds a tree for multiple transactions', () => {

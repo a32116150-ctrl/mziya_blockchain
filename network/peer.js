@@ -310,6 +310,12 @@ export class MziyaP2P {
 
   _handleIncomingTransaction(txData) {
     const tx = Transaction.fromJSON(txData);
+    // Validate (signature, nonce, balance, …) before it can enter the mempool
+    if (typeof this.blockchain.addPendingTransaction === 'function') {
+      const result = this.blockchain.addPendingTransaction(tx);
+      if (result.success) this.onTransaction?.(tx);
+      return;
+    }
     const result = this.mempool.add(tx);
     if (result.added) this.onTransaction?.(tx);
   }

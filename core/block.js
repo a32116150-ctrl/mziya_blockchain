@@ -5,7 +5,9 @@
  */
 
 import { sha3_256 } from '@noble/hashes/sha3';
-import { bytesToHex } from '@noble/hashes/utils';
+import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
+import { ed25519 } from '@noble/curves/ed25519';
+import { sign as signPayload, verify as verifyPayload, deriveAddress } from './wallet.js';
 
 // ── Canonical JSON ─────────────────────────────────────────────────────────
 
@@ -17,9 +19,12 @@ export function canonicalStringify(obj) {
   if (obj === null || obj === undefined) return JSON.stringify(obj);
   if (typeof obj !== 'object') return JSON.stringify(obj);
   if (Array.isArray(obj)) {
-    return '[' + obj.map(v => canonicalStringify(v)).join(',') + ']';
+    return '[' + obj.map(v => (v === undefined ? 'null' : canonicalStringify(v))).join(',') + ']';
   }
-  const keys = Object.keys(obj).sort();
+  if (typeof obj.toJSON === 'function') return canonicalStringify(obj.toJSON());
+  // Skip undefined values exactly like JSON.stringify, so a value hashes the
+  // same before and after a network round trip.
+  const keys = Object.keys(obj).filter(k => obj[k] !== undefined).sort();
   const parts = keys.map(k => JSON.stringify(k) + ':' + canonicalStringify(obj[k]));
   return '{' + parts.join(',') + '}';
 }
@@ -39,7 +44,7 @@ export function buildMerkleTree(transactions) {
   }
 
   let level = transactions.map(tx =>
-    hashData(typeof tx === 'string' ? tx : JSON.stringify(tx))
+    hashData(typeof tx === 'string' ? tx : canonicalStringify(tx))
   );
 
   while (level.length > 1) {
@@ -58,14 +63,15 @@ export function buildMerkleTree(transactions) {
 // ── Block ──────────────────────────────────────────────────────────────────
 
 export class Block {
-  constructor({ index, previousHash, transactions, timestamp, miner, nonce = 0, signature = null, modelStates = null }) {
+  constructor({ index, previousHash, transactions, timestamp, miner, nonce = 0, signature = null, minerPublicKey = null, modelStates = null }) {
     this.index = index;
     this.previousHash = previousHash;
     this.transactions = transactions || [];
     this.timestamp = timestamp || Date.now();
     this.miner = miner;          // address of block producer
     this.nonce = nonce;
-    this.signature = signature;  // BLS aggregate signature from validators
+    this.signature = signature;  // Ed25519 signature of `hash` by the block producer
+    this.minerPublicKey = minerPublicKey; // producer's public key (must derive to `miner`)
     this.modelStates = modelStates || {}; // globally averaged AI models: { modelId: [weights] }
     this.merkleRoot = buildMerkleTree(this.transactions);
     this.hash = this.computeHash();
@@ -84,6 +90,24 @@ export class Block {
     return hashData(content);
   }
 
+  /** Sign the block as its producer. `miner` must be the address of this key. */
+  sign(privateKey) {
+    this.minerPublicKey = bytesToHex(ed25519.getPublicKey(hexToBytes(privateKey)));
+    this.signature = signPayload(this.hash, privateKey);
+    return this;
+  }
+
+  /** True when the block was signed by the key behind its `miner` address. */
+  hasValidSignature() {
+    if (!this.signature || !this.minerPublicKey) return false;
+    try {
+      if (deriveAddress(this.minerPublicKey) !== this.miner) return false;
+    } catch {
+      return false;
+    }
+    return verifyPayload(this.hash, this.signature, this.minerPublicKey);
+  }
+
   toJSON() {
     return {
       index: this.index,
@@ -94,6 +118,7 @@ export class Block {
       miner: this.miner,
       nonce: this.nonce,
       signature: this.signature,
+      minerPublicKey: this.minerPublicKey,
       modelStates: this.modelStates,
       transactions: this.transactions,
     };
@@ -108,6 +133,7 @@ export class Block {
       miner: obj.miner,
       nonce: obj.nonce,
       signature: obj.signature,
+      minerPublicKey: obj.minerPublicKey || null,
       modelStates: obj.modelStates,
     });
     // SEC-03: Re-compute hash instead of blindly trusting input
